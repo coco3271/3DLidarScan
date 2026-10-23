@@ -1,5 +1,6 @@
 import ARKit
 import Foundation
+import Metal
 
 /// Writes ARKit's LiDAR mesh (all ARMeshAnchors) as one binary PLY in world space, in the
 /// layout house-capture readers expect:

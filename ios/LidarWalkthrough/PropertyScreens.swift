@@ -193,7 +193,8 @@ struct WalkthroughScreen: View {
       do {
         html = try await Task.detached(priority: .userInitiated) {
           let existing = folder.appendingPathComponent("walkthrough.html")
-          return FileManager.default.fileExists(atPath: existing.path) ? existing : try WalkthroughBuilder.build(folder)
+          if FileManager.default.fileExists(atPath: existing.path) { return existing }
+          return try WalkthroughBuilder.build(folder)
         }.value
       } catch {
         self.error = error.localizedDescription
