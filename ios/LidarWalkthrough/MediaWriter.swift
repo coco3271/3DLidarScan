@@ -107,7 +107,8 @@ final class MediaWriter: @unchecked Sendable {
     let record = DepthRecord(
       file: "depth/\(name).f16z", confidence: "depth/\(name).conf", rgb: cg == nil ? nil : "depth/\(name).jpg",
       rgbIntrinsics: kc.columnMajor, room: room, timestamp: frame.timestamp,
-      width: w, height: h, transform: frame.camera.transform.columnMajor, intrinsics: k.columnMajor)
+      width: w, height: h, transform: frame.camera.transform.columnMajor, intrinsics: k.columnMajor,
+      pose: CameraPose(frame.camera.transform))
     begin()
     queue.async {
       defer { self.end() }

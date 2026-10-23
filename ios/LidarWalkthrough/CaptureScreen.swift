@@ -58,6 +58,18 @@ struct CaptureScreen: View {
         Text("\(controller.photoCount) photos · \(controller.manualPhotoCount) high-res · \(controller.depthFrameCount) depth")
           .font(.caption).monospacedDigit()
         Text(controller.location.accuracyText).font(.caption2).foregroundStyle(.secondary)
+        if let here = controller.here {
+          // where the phone is right now in the scan's coordinates (meters) + which way it faces
+          Text(String(format: "X %.2f  Z %.2f  · %.0f°", here.point.x, here.point.y, here.yaw * 180 / .pi))
+            .font(.caption2.monospaced()).foregroundStyle(.secondary)
+        }
+        if controller.phase == .scanning || controller.phase == .roomDone {
+          // live map: green = you, yellow cones = photos (bright = high-res shutter shots)
+          PlanCanvas(trail: controller.trail, spots: controller.photoSpots, here: controller.here, minSpan: 3)
+            .frame(width: 140, height: 140)
+            .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+            .allowsHitTesting(false)
+        }
       }
       .padding(10)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))

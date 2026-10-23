@@ -60,7 +60,12 @@ Settings › General › VPN & Device Management and trust your developer certif
    so every room lands in the same coordinate system and the floor plan lines up.
 5. Tap **Finish property**. With two or more rooms, RoomPlan merges them into one floor plan.
 
-On the scan's page you can **Walk through in 3D** on the phone, view **Apple's RoomPlan
+While scanning, a live mini-map shows where you are and which way you're facing (green),
+the path you walked, and a cone for every photo. A shutter photo also saves the LiDAR depth
+frame from the same moment, so each photo has its own position (X/Y/Z), direction and
+depth.
+
+On the scan's page you can **Walk through in 3D** on the phone, open the **Photo map** (floor plan with every photo's position and direction; tap one to see its X/Y/Z), view **Apple's RoomPlan
 model** (USDZ in Quick Look), or **Export ZIP for Claude / ChatGPT**, which opens the share
 sheet (AirDrop, Files, Mail…). Scans are also visible in the **Files** app under
 On My iPhone › 3D LiDAR Scan.
@@ -98,6 +103,7 @@ python3 -m http.server 8000      # then http://localhost:8000/web/
   mesh/room-N.ply          LiDAR mesh, classified faces (wall/floor/ceiling/door/…)
   photos/photos.json       pose, intrinsics, GPS, heading, high-res flag for every photo
   photos/NNNN.jpg          photos (EXIF GPS; manual shots are full resolution)
+  poses.csv                every photo + depth frame: x,y,z (m), direction, yaw/pitch, paired LiDAR frame, GPS
   depth/frames.json        LiDAR depth frames with poses
   depth/NNNNN.f16z|conf|jpg
   _ai/                     make_walkthrough.py, viewer, scan-to-threejs skill + scripts

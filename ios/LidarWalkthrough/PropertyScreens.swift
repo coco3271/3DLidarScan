@@ -110,6 +110,9 @@ struct PropertyDetailScreen: View {
         NavigationLink { WalkthroughScreen(folder: scan.url, title: scan.name) } label: {
           Label("Walk through in 3D", systemImage: "figure.walk")
         }
+        NavigationLink { PhotoMapScreen(folder: scan.url) } label: {
+          Label("Photo map (where each photo was taken)", systemImage: "map")
+        }
         Button { quickLook = appleModel } label: { Label("Apple RoomPlan model", systemImage: "cube") }
           .disabled(appleModel == nil)
       }

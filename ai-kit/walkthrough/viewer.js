@@ -171,6 +171,22 @@ export async function startWalkthrough(THREE, container, source) {
   })
 
   // ---- framing -----------------------------------------------------------------------------
+  const minimap = buildMinimap(THREE, ui.map, {
+    walls: walls.map((w) => segment(w, 'wall')),
+    openings: openings.map(([kind, e]) => segment(e, kind)),
+    meshDots: walls.length ? [] : (scanMesh ? wallDots(scanMesh.ply, floorY) : []),
+    photos: tour.map((p) => ({ x: p.transform[12], z: p.transform[14], fx: -p.transform[8], fz: -p.transform[10], manual: p.manual })),
+  })
+  ui.map.addEventListener('click', (e) => {
+    const r = ui.map.getBoundingClientRect()
+    const hit = minimap.pick(e.clientX - r.left, e.clientY - r.top)
+    if (hit.photo != null) return goToPhoto(hit.photo)
+    anim = null
+    walk.pos.set(hit.x, floorY + EYE_HEIGHT, hit.z)
+    if (mode === 'dollhouse') { walk.yaw = orbit.yaw + Math.PI; walk.pitch = 0 }
+    setMode('walk')
+  })
+
   const bounds = new THREE.Box3()
   for (const g of [layers.model, layers.mesh, layers.photos]) bounds.expandByObject(g)
   if (bounds.isEmpty()) bounds.set(new THREE.Vector3(-3, floorY, -3), new THREE.Vector3(3, floorY + 2.5, 3))
@@ -236,7 +252,9 @@ export async function startWalkthrough(THREE, container, source) {
       p.capturedAt ? esc(new Date(p.capturedAt).toLocaleString()) : '',
       loc ? `<a target="_blank" rel="noopener" href="https://maps.apple.com/?ll=${loc.latitude},${loc.longitude}&q=Photo">` +
         `${loc.latitude.toFixed(6)}, ${loc.longitude.toFixed(6)}</a> ±${Math.round(loc.horizontalAccuracy)} m` : '',
-      loc && loc.heading != null ? `heading ${Math.round(loc.heading)}°` : '',
+      loc && loc.heading != null ? `compass ${Math.round(loc.heading)}°` : '',
+      poseText(p.transform),
+      p.depthFrame ? `LiDAR ${esc(p.depthFrame.split('/').pop())}` : '',
       p.note ? esc(p.note) : '',
     ].filter(Boolean).join(' · ')
     ui.photoImg.removeAttribute('src')
@@ -406,6 +424,8 @@ export async function startWalkthrough(THREE, container, source) {
       camera.position.copy(walk.pos)
       camera.rotation.set(walk.pitch, walk.yaw, 0)
     }
+    const look = lookDir()
+    minimap.draw(mode === 'dollhouse' ? null : { x: camera.position.x, z: camera.position.z, fx: look.x, fz: look.z }, tourIndex)
     renderer.render(scene, camera)
     requestAnimationFrame(frame)
   }
@@ -668,6 +688,102 @@ export function parsePLY(buffer) {
   return { vertexCount, faceCount: indices.length / 3, positions, normals, indices: new Uint32Array(indices), faceClass }
 }
 
+// ---- floor-plan mini map: "where was the phone?" ---------------------------------------------------
+
+/** A RoomPlan surface seen from above: its center ± half its width along its local x axis */
+function segment(e, kind) {
+  const t = e.transform, c = [t[12], t[14]]
+  let x = [t[0], t[2]]
+  const l = Math.hypot(x[0], x[1]) || 1
+  const h = e.dimensions[0] / 2 / l
+  return { a: [c[0] - x[0] * h, c[1] - x[1] * h], b: [c[0] + x[0] * h, c[1] + x[1] * h], kind }
+}
+
+/** No RoomPlan walls: outline from LiDAR wall faces at hip-to-eye height */
+function wallDots(ply, floorY) {
+  const dots = [], P = ply.positions, I = ply.indices
+  const step = Math.max(1, Math.floor(ply.faceCount / 6000))
+  for (let f = 0; f < ply.faceCount; f += step) {
+    if (ply.faceClass && ply.faceClass[f] !== 1) continue
+    const v = I[f * 3]
+    const y = P[v * 3 + 1] - floorY
+    if (y > 0.6 && y < 1.8) dots.push([P[v * 3], P[v * 3 + 2]])
+  }
+  return dots
+}
+
+/** X/Y/Z position and heading of a camera-to-world transform (column-major) */
+function poseText(t) {
+  const fx = -t[8], fz = -t[10]
+  const yaw = ((Math.atan2(-fx, -fz) * 180 / Math.PI) + 360) % 360
+  return `X ${t[12].toFixed(2)} · Y ${t[13].toFixed(2)} · Z ${t[14].toFixed(2)} m · facing ${Math.round(yaw)}°`
+}
+
+function buildMinimap(THREE, canvas, plan) {
+  const ctx = canvas.getContext('2d')
+  const pts = [...plan.walls.flatMap((w) => [w.a, w.b]), ...plan.meshDots, ...plan.photos.map((p) => [p.x, p.z])]
+  let lo = [Infinity, Infinity], hi = [-Infinity, -Infinity]
+  for (const [x, z] of pts) { lo = [Math.min(lo[0], x), Math.min(lo[1], z)]; hi = [Math.max(hi[0], x), Math.max(hi[1], z)] }
+  if (!pts.length) { lo = [-2, -2]; hi = [2, 2] }
+  const center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2]
+  const span = Math.max(3, hi[0] - lo[0], hi[1] - lo[1])
+  let W = 0, H = 0, scale = 1, dpr = 1
+  // world x → right, world z → down (seen from above)
+  const map = (x, z) => [W / 2 + (x - center[0]) * scale, H / 2 + (z - center[1]) * scale]
+  const unmap = (u, v) => [center[0] + (u - W / 2) / scale, center[1] + (v - H / 2) / scale]
+
+  function cone(x, z, fx, fz, len, fill) {
+    const l = Math.hypot(fx, fz) || 1
+    fx /= l; fz /= l
+    const [cx, cy] = map(x, z), a = 0.45
+    const rot = (s) => [fx * Math.cos(s) - fz * Math.sin(s), fx * Math.sin(s) + fz * Math.cos(s)]
+    const [lx, ly] = rot(a), [rx, ry] = rot(-a)
+    ctx.beginPath()
+    ctx.moveTo(cx, cy); ctx.lineTo(cx + lx * len, cy + ly * len); ctx.lineTo(cx + rx * len, cy + ry * len); ctx.closePath()
+    ctx.fillStyle = fill; ctx.fill()
+    ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = 1; ctx.stroke()
+    ctx.beginPath(); ctx.arc(cx, cy, 3.2, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); ctx.stroke()
+  }
+
+  function draw(cam, selected) {
+    const w = canvas.clientWidth, h = canvas.clientHeight
+    dpr = Math.min(devicePixelRatio || 1, 2)
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr)
+    }
+    W = w; H = h
+    scale = (Math.min(w, h) - 24) / span
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, w, h)
+    ctx.fillStyle = 'rgba(255,255,255,.55)'
+    for (const [x, z] of plan.meshDots) { const [u, v] = map(x, z); ctx.fillRect(u - 0.6, v - 0.6, 1.2, 1.2) }
+    ctx.lineCap = 'round'
+    for (const s of plan.walls) {
+      ctx.beginPath(); ctx.moveTo(...map(...s.a)); ctx.lineTo(...map(...s.b))
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.stroke()
+    }
+    for (const s of plan.openings) {
+      ctx.beginPath(); ctx.moveTo(...map(...s.a)); ctx.lineTo(...map(...s.b))
+      ctx.strokeStyle = s.kind === 'window' ? '#7fd6ff' : s.kind === 'door' ? '#f0a040' : '#5f9'; ctx.lineWidth = 4; ctx.stroke()
+    }
+    plan.photos.forEach((p, i) => cone(p.x, p.z, p.fx, p.fz, i === selected ? 16 : 11, i === selected ? '#ff4f9a' : 'rgba(255,207,51,.85)'))
+    if (cam) cone(cam.x, cam.z, cam.fx, cam.fz, 22, '#ffd23f')
+  }
+
+  function pick(u, v) {
+    let best = null, bestD = 14
+    plan.photos.forEach((p, i) => {
+      const [x, y] = map(p.x, p.z)
+      const d = Math.hypot(x - u, y - v)
+      if (d < bestD) { bestD = d; best = i }
+    })
+    const [x, z] = unmap(u, v)
+    return { photo: best, x, z }
+  }
+
+  return { draw, pick }
+}
+
 // ---- small helpers -------------------------------------------------------------------------------
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
@@ -715,12 +831,14 @@ function buildUI(container) {
   .wt-knob{position:absolute;left:33px;top:33px;width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.5);pointer-events:none}
   .wt[data-mode=walk] .wt-joy,.wt[data-mode=tour] .wt-joy{display:block}
   .wt-help{font-size:11px;opacity:.6}
+  .wt-map{position:absolute;right:12px;top:72px;width:190px;height:190px;border-radius:12px;background:rgba(20,22,28,.78);border:1px solid rgba(255,255,255,.1);cursor:crosshair}
   @media (hover:hover){.wt-joy{opacity:.5}}
-  .wt-photo img{max-height:52vh;object-fit:contain}
+  .wt-photo img{max-height:calc(100vh - 470px);min-height:120px;object-fit:contain}
   @media (max-width:600px){
     .wt-modes{margin-left:0}.wt-help{display:none}
     .wt-layers{gap:8px;font-size:11px;padding:6px 10px}
     .wt-joy{bottom:64px}
+    .wt-map{width:120px;height:120px;top:128px}
     .wt-photo{width:46vw;bottom:64px;padding:6px}.wt-photo img{max-height:30vh}
     .wt-photo .meta{font-size:10px}.wt-photo .row button{padding:4px 8px;min-height:30px}.wt-photo .count{font-size:11px}
   }`
@@ -742,6 +860,7 @@ function buildUI(container) {
       <label><input type="checkbox" data-layer="photos" checked>Photos</label>
       <span class="wt-help">Drag to look · WASD / joystick to walk · tap a pink dot or the floor</span>
     </div>
+    <canvas class="wt-map" title="Where was the phone? Tap to walk there"></canvas>
     <div class="wt-joy"><div class="wt-knob"></div></div>
     <div class="wt-card wt-photo" hidden>
       <img alt="Photo taken at this spot">
@@ -756,6 +875,6 @@ function buildUI(container) {
     toggles: Object.fromEntries([...root.querySelectorAll('[data-layer]')].map((i) => [i.dataset.layer, i])),
     photoPanel: q('.wt-photo'), photoImg: q('.wt-photo img'), photoMeta: q('.wt-photo .meta'), photoCounter: q('.wt-photo .count'),
     prev: q('[data-act=prev]'), next: q('[data-act=next]'), closePhoto: q('[data-act=close]'),
-    joystick: q('.wt-joy'), knob: q('.wt-knob'),
+    joystick: q('.wt-joy'), knob: q('.wt-knob'), map: q('.wt-map'),
   }
 }

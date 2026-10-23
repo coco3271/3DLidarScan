@@ -26,6 +26,7 @@ spaces, so quote paths.
 | `photos/photos.json` + `photos/NNNN.jpg` | Posed photos. `manual: true` marks the high-resolution shots the user took at each spot (the tour stops). Each has `location` (lat/lon, accuracy in m, compass `heading`) |
 | `depth/frames.json` + `depth/NNNNN.{f16z,conf,jpg}` | LiDAR depth frames: 256×192 Float16 meters stored as raw DEFLATE (`zlib.decompress(raw, -15)`), confidence 0–2, and 640×480 RGB, each with its pose |
 | `walkthrough.html` | A ready-made walkthrough built on the phone (see step 2) |
+| `poses.csv` | One row per photo and depth frame: **where the phone was** (`x,y,z` in meters), **which way it pointed** (`dir_x,dir_y,dir_z`, `yaw_deg`, `pitch_deg`), and the paired photo ↔ LiDAR file, plus GPS |
 
 Conventions that matter:
 
@@ -37,6 +38,13 @@ Conventions that matter:
 - RoomPlan elements: `transform` is the element's **center**, and `dimensions` is
   `[width, height, depth]` (depth is 0 for walls, doors and windows). A door, window or
   opening belongs to the wall whose `identifier` equals its `parentIdentifier`.
+- **Every photo has its LiDAR frame.** `photos.json` entries have `depthFrame`
+  (`depth/NNNNN.f16z`), the depth captured at the same moment from the same spot, and that
+  depth frame's `photo` points back. `pose` gives the camera's `position` [x,y,z] (m),
+  `direction` (unit view vector), `yaw` (degrees, counter-clockwise seen from above,
+  0 = facing world −Z) and `pitch`. These are the same numbers as `transform`, unpacked.
+  Use them to place each photo on the floor plan and to render the model from exactly
+  where the photo was taken.
 - Photo `transform` is camera-to-world, and the camera looks down **−Z**.
   `intrinsics = [fx,0,0, 0,fy,0, cx,cy,1]` describe the raw **landscape** sensor pixels.
   Project with those and ignore EXIF orientation. To view a photo upright, rotate it 90°

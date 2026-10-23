@@ -145,6 +145,13 @@ def camera_pose(pos, yaw, pitch=0.0):
     return frame(x, y, z, pos)
 
 
+def pose_of(T):
+    """The app's CameraPose: position, unit view direction, yaw (0 = facing -Z, CCW from above), pitch"""
+    f = -T[:3, 2] / np.linalg.norm(T[:3, 2])
+    return {'position': [float(v) for v in T[:3, 3]], 'direction': [float(v) for v in f],
+            'yaw': math.degrees(math.atan2(-f[0], -f[2])), 'pitch': math.degrees(math.asin(max(-1, min(1, f[1]))))}
+
+
 def render(T, w, h, fx, fy, cx, cy):
     v, u = np.mgrid[0:h, 0:w]
     d_cam = np.stack([(u + 0.5 - cx) / fx, -(v + 0.5 - cy) / fy, -np.ones_like(u, dtype=float)], -1).reshape(-1, 3)
@@ -239,7 +246,7 @@ def main():
             photos.append({'file': fname, 'room': room, 'timestamp': ts, 'width': PW, 'height': PH, 'transform': col_major(T),
                            'intrinsics': [PF, 0, 0, 0, PF, 0, PW / 2, PH / 2, 1], 'tracking': 'normal', 'manual': i % 8 == 0,
                            'highRes': i % 8 == 0, 'pass': 'scan',
-                           'capturedAt': '2026-10-23T15:00:00Z',
+                           'capturedAt': '2026-10-23T15:00:00Z', 'depthFrame': f'depth/{name}.f16z', 'pose': pose_of(T),
                            'location': {'latitude': 45.50169 + i * 1e-6, 'longitude': -73.56725, 'altitude': 30.0,
                                         'horizontalAccuracy': 8.0, 'verticalAccuracy': 4.0, 'heading': (math.degrees(yaw) % 360), 'headingAccuracy': 15.0}})
     json.dump(photos, open(os.path.join(out, 'photos/photos.json'), 'w'), indent=1)

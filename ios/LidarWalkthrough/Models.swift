@@ -110,6 +110,32 @@ struct PhotoRecord: Codable {
   // additions
   var capturedAt: Date?
   var location: GeoSample?
+  /// where the phone was and which way it pointed (derived from `transform`, for convenience)
+  var pose: CameraPose?
+  /// the LiDAR depth frame captured with this photo ("depth/NNNNN.f16z", see depth/frames.json)
+  var depthFrame: String?
+}
+
+/// Human-readable camera pose: the same information as the 4×4 `transform`, unpacked.
+/// Session world coordinates: meters, +Y up, right-handed (= three.js).
+struct CameraPose: Codable {
+  /// camera position [x, y, z] in meters
+  var position: [Float]
+  /// unit vector the camera looks along (world space; ARKit cameras look down their -Z)
+  var direction: [Float]
+  /// heading on the floor plan in degrees, counter-clockwise seen from above, 0 = facing world -Z
+  var yaw: Float
+  /// degrees above (+) or below (-) the horizon
+  var pitch: Float
+
+  init(_ t: simd_float4x4) {
+    let p = t.columns.3
+    let f = simd_normalize(-simd_make_float3(t.columns.2))
+    position = [p.x, p.y, p.z]
+    direction = [f.x, f.y, f.z]
+    yaw = atan2(-f.x, -f.z) * 180 / .pi
+    pitch = asin(max(-1, min(1, f.y))) * 180 / .pi
+  }
 }
 
 struct CameraState: Codable {
@@ -160,6 +186,10 @@ struct DepthRecord: Codable {
   var transform: [Float]
   /// column-major 3x3, scaled to the depth map's resolution
   var intrinsics: [Float]
+  // additions
+  var pose: CameraPose?
+  /// the photo taken together with this depth frame ("photos/NNNN.jpg"), if any
+  var photo: String?
 }
 
 enum BundleJSON {

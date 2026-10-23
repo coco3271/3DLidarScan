@@ -26,6 +26,10 @@ final class CaptureController: NSObject, ObservableObject {
   @Published private(set) var flash = false
   @Published private(set) var warning: String?
   @Published private(set) var finishingStep = ""
+  /// live floor-plan data for the mini map: where you walked, where you are, where photos were taken
+  @Published private(set) var trail: [SIMD2<Float>] = []
+  @Published private(set) var here: MapSpot?
+  @Published private(set) var photoSpots: [MapSpot] = []
 
   let arSession = ARSession()
   private let roomDelegate = RoomViewDelegate()
@@ -222,6 +226,32 @@ final class CaptureController: NSObject, ObservableObject {
     try? e.encode(photos).write(to: folder.appendingPathComponent("photos/photos.json"))
     try? e.encode(depthFrames).write(to: folder.appendingPathComponent("depth/frames.json"))
     try? e.encode(manifest).write(to: folder.appendingPathComponent("manifest.json"), options: .atomic)
+    try? posesCSV().write(to: folder.appendingPathComponent("poses.csv"), atomically: true, encoding: .utf8)
+  }
+
+  /// One row per photo and depth frame: where the phone was, where it pointed, and which
+  /// photo ↔ LiDAR frame belong together. Same numbers as the JSON, easy to read.
+  private func posesCSV() -> String {
+    func f(_ v: Float) -> String { String(format: "%.3f", v) }
+    func g(_ v: Double?) -> String { v.map { String(format: "%.7f", $0) } ?? "" }
+    var rows = ["kind,file,room,timestamp,x,y,z,dir_x,dir_y,dir_z,yaw_deg,pitch_deg,manual,high_res,paired_file,latitude,longitude,gps_accuracy_m,compass_heading_deg"]
+    for p in photos {
+      let pose = p.pose ?? CameraPose(simd_float4x4(columnMajor: p.transform))
+      rows.append(["photo", p.file, "\(p.room)", String(format: "%.3f", p.timestamp),
+                   f(pose.position[0]), f(pose.position[1]), f(pose.position[2]),
+                   f(pose.direction[0]), f(pose.direction[1]), f(pose.direction[2]), f(pose.yaw), f(pose.pitch),
+                   p.manual ? "1" : "0", (p.highRes ?? false) ? "1" : "0", p.depthFrame ?? "",
+                   g(p.location?.latitude), g(p.location?.longitude), g(p.location?.horizontalAccuracy), g(p.location?.heading)]
+        .joined(separator: ","))
+    }
+    for d in depthFrames {
+      let pose = d.pose ?? CameraPose(simd_float4x4(columnMajor: d.transform))
+      rows.append(["depth", d.file, "\(d.room)", String(format: "%.3f", d.timestamp),
+                   f(pose.position[0]), f(pose.position[1]), f(pose.position[2]),
+                   f(pose.direction[0]), f(pose.direction[1]), f(pose.direction[2]), f(pose.yaw), f(pose.pitch),
+                   "", "", d.photo ?? "", "", "", "", ""].joined(separator: ","))
+    }
+    return rows.joined(separator: "\n") + "\n"
   }
 
   // MARK: per-frame recording
@@ -233,6 +263,7 @@ final class CaptureController: NSObject, ObservableObject {
       previousPose = (frame.timestamp, frame.camera.transform)
       return
     }
+    updateMap(frame)
     considerDepth(frame)
     considerAutoPhoto(frame)
     previousPose = (frame.timestamp, frame.camera.transform)
@@ -259,18 +290,35 @@ final class CaptureController: NSObject, ObservableObject {
     arSession.run(updated, options: [])
   }
 
+  /// Depth while walking: up to 5/s, only when the phone moved or turned a little
   private func considerDepth(_ frame: ARFrame) {
-    guard let depth = frame.sceneDepth, writer.inFlight < 4 else { return }
+    guard frame.sceneDepth != nil, writer.inFlight < 4 else { return }
     let pose = frame.camera.transform
     if let last = lastDepth {
       guard frame.timestamp - last.time > 0.2, moved(pose, last.pose) > 0.04 || turned(pose, last.pose) > 0.06 else { return }
     }
-    lastDepth = (frame.timestamp, pose)
+    recordDepth(frame)
+  }
+
+  /// Save the frame's LiDAR depth (+ its 640×480 RGB and pose) as depth/NNNNN.*
+  @discardableResult
+  private func recordDepth(_ frame: ARFrame, photo: String? = nil) -> DepthRecord? {
+    guard let depth = frame.sceneDepth else { return nil }
+    lastDepth = (frame.timestamp, frame.camera.transform)
     let name = String(format: "%05d", depthFrames.count)
-    if let record = writer.writeDepth(frame, depth: depth, folder: folder, name: name, room: roomIndex) {
-      depthFrames.append(record)
-      depthFrameCount = depthFrames.count
-    }
+    guard var record = writer.writeDepth(frame, depth: depth, folder: folder, name: name, room: roomIndex) else { return nil }
+    record.photo = photo
+    depthFrames.append(record)
+    depthFrameCount = depthFrames.count
+    return record
+  }
+
+  private func updateMap(_ frame: ARFrame) {
+    let t = frame.camera.transform
+    let spot = MapSpot(t, manual: false)
+    here = spot
+    if let last = trail.last, simd_distance(last, spot.point) < 0.25 { return }
+    trail.append(spot.point)
   }
 
   /// A sharp reference photo whenever you've moved ~0.6 m or turned ~25° and are holding steady
@@ -318,6 +366,10 @@ final class CaptureController: NSObject, ObservableObject {
     let maxEdge = manual ? Self.maxManualEdge : Self.maxAutoEdge
     guard let size = writer.writePhoto(frame.capturedImage, to: folder.appendingPathComponent(file), maxEdge: maxEdge, geo: geo) else { return }
     nextPhoto += 1
+    // the LiDAR depth for this exact view: the photo's own frame, or (for a full-resolution
+    // still, which may carry no depth) the live frame from the same moment
+    let depthSource = frame.sceneDepth != nil ? frame : arSession.currentFrame
+    let depth = depthSource.flatMap { recordDepth($0, photo: file) }
     let scale = Float(size.width) / Float(frame.camera.imageResolution.width)
     var k = frame.camera.intrinsics
     k.columns.0.x *= scale; k.columns.1.y *= scale; k.columns.2.x *= scale; k.columns.2.y *= scale
@@ -329,7 +381,8 @@ final class CaptureController: NSObject, ObservableObject {
       camera: CameraState(exposureOffset: frame.camera.exposureOffset,
                           ambientIntensity: frame.lightEstimate.map { Float($0.ambientIntensity) },
                           colorTemperature: frame.lightEstimate.map { Float($0.ambientColorTemperature) }),
-      capturedAt: Date(), location: geo))
+      capturedAt: Date(), location: geo, pose: CameraPose(frame.camera.transform), depthFrame: depth?.file))
+    photoSpots.append(MapSpot(frame.camera.transform, manual: manual))
     photoCount = photos.count
     if manual { manualPhotoCount += 1 }
   }
@@ -378,5 +431,27 @@ final class RoomViewDelegate: NSObject, RoomCaptureViewDelegate {
 
   func captureView(didPresent processedResult: CapturedRoom, error: (any Error)?) {
     onRoom?(processedResult, error)
+  }
+}
+
+/// A camera position + heading on the floor plan (x/z of the session world, yaw in radians,
+/// 0 = facing world -Z, counter-clockwise seen from above)
+struct MapSpot: Equatable {
+  var point: SIMD2<Float>
+  var yaw: Float
+  var manual: Bool
+
+  init(_ t: simd_float4x4, manual: Bool) {
+    point = SIMD2(t.columns.3.x, t.columns.3.z)
+    let f = -simd_make_float3(t.columns.2)
+    yaw = atan2(-f.x, -f.z)
+    self.manual = manual
+  }
+}
+
+extension simd_float4x4 {
+  init(columnMajor m: [Float]) {
+    self.init(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
+              SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15]))
   }
 }
