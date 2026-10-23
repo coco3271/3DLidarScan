@@ -1,0 +1,39 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  walkthrough:
+    name: AI kit + walkthrough viewer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install numpy pillow
+      - run: cd tests && npm install && npx playwright-core install --with-deps chromium
+      - run: tests/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: walkthrough-screenshots
+          path: tests/out/*.png
+  ios:
+    name: iOS app builds
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: cd ios && xcodegen
+      - name: Build (device SDK, unsigned)
+        run: |
+          xcodebuild -project ios/LidarWalkthrough.xcodeproj -scheme LidarWalkthrough \
+            -destination 'generic/platform=iOS' -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO build > build.log 2>&1 \
+            || { grep -E "error:" -A3 build.log | head -150; tail -30 build.log; exit 1; }
+          grep -E "warning:" build.log | sort -u | head -60 || true
+          tail -3 build.log

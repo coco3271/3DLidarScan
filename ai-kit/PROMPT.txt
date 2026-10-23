@@ -1,0 +1,6 @@
+I've attached a LiDAR scan of a property from my iPhone (a zip: Apple RoomPlan rooms, LiDAR mesh, depth frames, and photos with GPS). Please recreate an interactive 3D walkthrough of the property.
+
+1. Unzip it and read START_HERE.md (inside the zip) before anything else. It explains the file format and includes the scripts to use.
+2. First, run _ai/make_walkthrough.py on the scan and give me the resulting walkthrough.html so I have a working walkthrough right away.
+3. Then follow the scan-to-threejs workflow in START_HERE.md to build a cleaner, measured 3D model of the rooms (walls, doors, windows, furniture, materials matched to the photos). Deliver it as a single self-contained HTML file with dollhouse view, first-person walking (touch-friendly), and a tour of the photo spots.
+4. Tell me each room's size and the total floor area, and which parts are measured vs. approximated.

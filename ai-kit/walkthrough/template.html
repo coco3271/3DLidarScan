@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__TITLE__</title>
+<link rel="icon" href="data:,">
+<style>html,body{margin:0;height:100%;background:#15171c;color:#eee;font-family:system-ui,sans-serif}#app{position:fixed;inset:0}
+#err{position:fixed;inset:auto 12px 12px 12px;background:#5a1d24;padding:10px 14px;border-radius:10px;display:none;white-space:pre-wrap}</style>
+</head><body><div id="app"></div><div id="err"></div>
+<script id="data" type="application/json">__DATA__</script>
+<script type="module">
+const data = JSON.parse(document.getElementById('data').textContent)
+const bytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+const mod = (b64) => import(URL.createObjectURL(new Blob([bytes(b64)], { type: 'text/javascript' })))
+try {
+  const [THREE, viewer] = await Promise.all([mod(data.three), mod(data.viewer)])
+  const source = { files: Object.keys(data.files), read: async (p) => { const v = data.files[p]; if (v == null) throw new Error('missing ' + p); return bytes(v).buffer } }
+  window.walkthrough = await viewer.startWalkthrough(THREE, document.getElementById('app'), source)
+} catch (e) {
+  const el = document.getElementById('err'); el.style.display = 'block'; el.textContent = 'Could not open the walkthrough: ' + (e.stack || e)
+  console.error(e)
+}
+</script></body></html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Property Walkthrough</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#15171c; --fg:#eef0f4; --muted:#9aa0ab; --accent:#ff4f9a; --card:#1f232b; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,-apple-system,sans-serif; }
+  #app { position:fixed; inset:0; }
+  #drop { position:fixed; inset:0; display:grid; place-items:center; padding:16px; }
+  .panel { max-width:520px; width:100%; background:var(--card); border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:28px; text-align:center; }
+  h1 { margin:0 0 6px; font-size:22px; }
+  p { color:var(--muted); margin:6px 0 18px; }
+  label.button { display:inline-block; background:var(--accent); color:#fff; padding:12px 20px; border-radius:12px; cursor:pointer; font-weight:600; }
+  #drop.over .panel { outline:2px dashed var(--accent); outline-offset:6px; }
+  #msg { margin-top:14px; min-height:1.4em; color:var(--muted); }
+  #msg.err { color:#ff8a8a; }
+  input[type=file] { display:none; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="drop">
+  <div class="panel">
+    <h1>Property walkthrough</h1>
+    <p>Open the <b>.zip</b> exported by the 3D LiDAR Scan iPhone app. Everything stays on this device; nothing is uploaded.</p>
+    <label class="button">Choose scan .zip<input id="file" type="file" accept=".zip,application/zip"></label>
+    <div id="msg">…or drop it anywhere on this page</div>
+  </div>
+</div>
+<script src="jszip.min.js"></script>
+<script type="module">
+import * as THREE from '../ai-kit/walkthrough/three.bundle.min.js'
+import { startWalkthrough } from '../ai-kit/walkthrough/viewer.js'
+
+const drop = document.getElementById('drop'), msg = document.getElementById('msg')
+const say = (t, err) => { msg.textContent = t; msg.className = err ? 'err' : '' }
+
+async function open(file) {
+  try {
+    say('Unpacking…')
+    const zip = await JSZip.loadAsync(file)
+    const manifests = Object.keys(zip.files).filter((n) => n.split('/').pop() === 'manifest.json' && !n.includes('__MACOSX'))
+    if (!manifests.length) throw new Error('This zip has no manifest.json — is it a 3D LiDAR Scan export?')
+    const root = manifests.sort((a, b) => a.length - b.length)[0].slice(0, -'manifest.json'.length)
+    const files = Object.keys(zip.files).filter((n) => n.startsWith(root) && !zip.files[n].dir).map((n) => n.slice(root.length))
+    const source = { files, read: (p) => zip.file(root + p).async('arraybuffer') }
+    drop.remove()
+    window.walkthrough = await startWalkthrough(THREE, document.getElementById('app'), source)
+  } catch (e) {
+    console.error(e)
+    say(e.message || String(e), true)
+  }
+}
+document.getElementById('file').onchange = (e) => e.target.files[0] && open(e.target.files[0])
+addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over') })
+addEventListener('dragleave', () => drop.classList.remove('over'))
+addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) open(f) })
+const url = new URLSearchParams(location.search).get('zip')
+if (url) fetch(url).then((r) => r.blob()).then(open, (e) => say(e.message, true))
+</script>
+</body>
+</html>
