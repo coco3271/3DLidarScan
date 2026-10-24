@@ -86,16 +86,33 @@ BUNDLE_ID=${BUNDLE_ID:-com.lidarscan.$(echo "$TEAM_ID" | tr 'A-Z' 'a-z').walkthr
 echo "Team $TEAM_ID · bundle $BUNDLE_ID · device $DEVICE"
 
 # --- build, install, launch -----------------------------------------------------------------------
-xcodebuild -project LidarWalkthrough.xcodeproj -scheme LidarWalkthrough -configuration Debug \
-  -destination "id=$DEVICE" -derivedDataPath build \
-  -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
-  DEVELOPMENT_TEAM="$TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" CODE_SIGN_STYLE=Automatic \
-  build > build.log 2>&1 || true
+build() {
+  xcodebuild -project LidarWalkthrough.xcodeproj -scheme LidarWalkthrough -configuration Debug \
+    -destination "id=$DEVICE" -derivedDataPath build \
+    -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
+    DEVELOPMENT_TEAM="$TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" CODE_SIGN_STYLE=Automatic \
+    build > build.log 2>&1 || true
+  grep -q "BUILD SUCCEEDED" build.log
+}
+echo "Building (first build takes a few minutes)…"
+if ! build && grep -qiE "iOS [0-9.]+ is not installed|platform.*not installed" build.log; then
+  # Since Xcode 15 the iOS platform is a separate download (several GB); fetch it once and retry
+  echo "Xcode needs the iOS platform component to build for this phone; downloading it now (several GB, one time)…"
+  xcodebuild -downloadPlatform iOS
+  echo "Building again…"
+  build || true
+fi
 grep -E "error:|warning: .*(sign|provision)|BUILD (SUCCEEDED|FAILED)" build.log | sort -u || true
 APP=build/Build/Products/Debug-iphoneos/LidarWalkthrough.app
 if ! grep -q "BUILD SUCCEEDED" build.log || [ ! -d "$APP" ]; then
-  if grep -qiE "iOS [0-9.]+ is not installed|platform.*not installed|Unable to find a destination" build.log; then
-    echo "Xcode is missing the iOS platform for this phone. Run: xcodebuild -downloadPlatform iOS  (or Xcode › Settings › Components), then rerun."
+  if grep -qiE "iOS [0-9.]+ is not installed|platform.*not installed" build.log; then
+    PHONE_IOS=$(grep -oE "iOS [0-9.]+ is not installed" build.log | head -1 | grep -oE "[0-9.]+")
+    cat <<MSG
+Xcode still can't build for iOS $PHONE_IOS. Either:
+  - Xcode › Settings › Components: install the iOS $PHONE_IOS platform, or
+  - your Xcode ($(xcodebuild -version | head -1)) is older than iOS $PHONE_IOS: update Xcode in the App Store,
+then rerun this script.
+MSG
   elif grep -qiE "No Account for Team|No signing certificate|requires a development team|provisioning profile" build.log; then
     echo "Signing problem: in Xcode › Settings › Accounts make sure your Apple ID is signed in, then rerun."
   fi
