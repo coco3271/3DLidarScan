@@ -406,11 +406,12 @@ final class CaptureController: NSObject, ObservableObject {
 
   // MARK: helpers
 
-  private func moved(_ a: simd_float4x4, _ b: simd_float4x4) -> Float {
+  // pure math: callable from ARKit's completion handlers as well as the main actor
+  nonisolated private func moved(_ a: simd_float4x4, _ b: simd_float4x4) -> Float {
     simd_distance(simd_make_float3(a.columns.3), simd_make_float3(b.columns.3))
   }
 
-  private func turned(_ a: simd_float4x4, _ b: simd_float4x4) -> Float {
+  nonisolated private func turned(_ a: simd_float4x4, _ b: simd_float4x4) -> Float {
     acos(min(1, max(-1, simd_dot(simd_make_float3(a.columns.2), simd_make_float3(b.columns.2)))))
   }
 
