@@ -36,6 +36,23 @@ self-contained `walkthrough.html`.
 
 ## Install the app on your iPhone
 
+**Quickest:** plug the iPhone into your Mac, unlock it, tap **Trust**, then:
+
+```sh
+git clone -b claude/modest-gates-iupjvr https://github.com/coco3271/3DLidarScan.git
+cd 3DLidarScan/ios && ./install-on-iphone.sh
+```
+
+The script installs XcodeGen if needed, finds the connected iPhone and your signing team,
+then builds, installs and launches the app. One-time setup:
+- Xcode › Settings › Accounts: add your Apple ID (a free one works).
+- On the iPhone: Settings › Privacy & Security › **Developer Mode** on, then restart.
+- After the first install: Settings › General › VPN & Device Management › trust your Apple ID.
+
+Free Apple IDs re-sign every 7 days, so just rerun the script.
+
+**Or by hand in Xcode:**
+
 You need a Mac with Xcode 16 or newer, and a free Apple ID is enough for your own phone.
 
 ```sh
