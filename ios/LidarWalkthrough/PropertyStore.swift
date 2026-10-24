@@ -87,7 +87,13 @@ enum ScanExporter {
 
   static func zipFolder(_ folder: URL) throws -> URL {
     let fm = FileManager.default
-    let dir = fm.temporaryDirectory.appendingPathComponent("share/\(UUID().uuidString)", isDirectory: true)
+    let shares = fm.temporaryDirectory.appendingPathComponent("share", isDirectory: true)
+    // zips can be GBs: drop ones from earlier exports (older than an hour; a share in progress is newer)
+    for old in (try? fm.contentsOfDirectory(at: shares, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+      if let date = try? old.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+         date < Date().addingTimeInterval(-3600) { try? fm.removeItem(at: old) }
+    }
+    let dir = shares.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     let dest = dir.appendingPathComponent("\(folder.lastPathComponent).zip")
     var result: Result<URL, Error> = .failure(CocoaError(.fileReadUnknown))
@@ -122,8 +128,8 @@ enum WalkthroughBuilder {
   }
 
   @discardableResult
-  static func build(_ folder: URL) throws -> URL {
-    guard let kit = ScanExporter.aiKit else { throw BuildError.missingKit }
+  static func build(_ folder: URL, kit: URL? = ScanExporter.aiKit) throws -> URL {
+    guard let kit else { throw BuildError.missingKit }
     let read = { (path: String) -> Data? in try? Data(contentsOf: folder.appendingPathComponent(path)) }
     guard let manifestData = read("manifest.json") else { throw BuildError.noManifest }
     let manifest = try BundleJSON.decoder.decode(Manifest.self, from: manifestData)

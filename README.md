@@ -54,8 +54,11 @@ Settings › General › VPN & Device Management and trust your developer certif
 1. Tap **+** and enter the address or a name. GPS and the street address are added automatically.
 2. Name the first room and walk slowly along the walls. Apple's RoomPlan draws the room
    live. The app also records the LiDAR mesh, depth frames and automatic reference photos.
-3. At every spot you want in the walkthrough, stand still and tap the **shutter** for a
-   full-resolution photo of where you're standing (pose + GPS + heading).
+3. The app takes reference photos by itself as you move: one every ~0.4 m or ~17° turn,
+   only when you're steady enough for a sharp shot, and full-resolution when the phone allows.
+   At every spot you want as a tour stop, stand still and tap the **shutter** for a
+   full-resolution photo. Every photo is saved with where the phone was (X/Y/Z), which way
+   it pointed, the LiDAR depth from that moment, GPS and compass heading.
 4. Tap **Done with room**, then **Scan next room**. Walk there **without closing the app**,
    so every room lands in the same coordinate system and the floor plan lines up.
 5. Tap **Finish property**. With two or more rooms, RoomPlan merges them into one floor plan.
@@ -117,14 +120,27 @@ for measuring.
 
 ```sh
 tests/run.sh      # needs python3 + numpy + Pillow, node; downloads playwright-core into tests/
+
+# Swift logic tests in the iOS Simulator (macOS), using the synthetic scan:
+python3 tests/make_fake_bundle.py tests/out/FakeHouse
+cd ios && xcodegen && cd ..
+TEST_RUNNER_FIXTURE_BUNDLE=$PWD/tests/out/FakeHouse TEST_RUNNER_AI_KIT=$PWD/ai-kit TEST_RUNNER_OUT_DIR=$PWD/tests/out \
+  xcodebuild test -project ios/LidarWalkthrough.xcodeproj -scheme LidarWalkthroughTests -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
 `tests/make_fake_bundle.py` ray-traces a two-room house into a bundle in the same format
-(RoomPlan JSON, PLY, Float16 DEFLATE depth, posed JPEGs). The test then runs
-the vendored scan-to-threejs scripts and `make_walkthrough.py`, and opens both the
-single-file walkthrough and `web/index.html` in headless Chromium. It checks for errors and
-that the mesh was colored from the photos. CI (`.github/workflows/ci.yml`) runs that test
-and compiles the iOS app with the iOS SDK on a macOS runner.
+(RoomPlan JSON, PLY, Float16 DEFLATE depth, posed JPEGs), and `tests/make_variants.py`
+derives edge cases from it: one room, no mesh, no depth, no photos, ASCII PLY, raw depth,
+and a zip with no folder. `tests/run.sh` runs:
+- the vendored scan-to-threejs scripts,
+- `make_walkthrough.py`,
+- the kit's unit tests (`tests/test_kit.py`),
+- `tests/e2e.mjs`, which loads every variant in headless Chromium and drives the real UI,
+- `tests/compare_poses.py`, which renders the scan from every photo's camera and checks
+  pixel by pixel that it reproduces that photo.
+
+CI (`.github/workflows/ci.yml`) also compiles the app, runs the Swift tests in the iOS
+Simulator, and opens the walkthrough built by the app's own Swift code in a browser.
 
 `ai-kit/walkthrough/three.bundle.min.js` is three.js r180 bundled into one ES module so the
 walkthrough works offline, including inside the single HTML file:

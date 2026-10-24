@@ -55,12 +55,17 @@ final class CaptureController: NSObject, ObservableObject {
   private var lastConfigCheck: TimeInterval = 0
   private var configRuns = 0
   private var highResInFlight = false
+  /// the device/RoomPlan configuration refused a full-resolution still: stop asking for auto photos
+  private var highResSupported = true
+  private var lastHighResRequest: CFTimeInterval = 0
   private var roomMeshRecord: MeshRecord?
 
   /// long edge of saved shutter photos (full-resolution stills are ~4032×3024)
   private static let maxManualEdge: CGFloat = 4032
-  /// long edge of automatic photos (ARKit video frames are 1920×1440)
-  private static let maxAutoEdge: CGFloat = 1920
+  /// long edge of automatic photos: full-resolution stills scaled to 3024, video frames stay 1920×1440
+  private static let maxAutoEdge: CGFloat = 3024
+  /// predicted motion smear (pixels at 1920 wide) above which an automatic photo is skipped
+  private static let maxAutoBlur: Float = 2.5
 
   init(folder: URL, propertyName: String) {
     self.folder = folder
@@ -114,19 +119,24 @@ final class CaptureController: NSObject, ObservableObject {
     guard phase == .scanning else { return }
     phase = .processingRoom
     ticker?.invalidate()
+    Task {
+      await self.exportMesh()
+      self.roomCaptureView.captureSession.stop(pauseARSession: false)
+    }
+  }
+
+  /// Write ARKit's current LiDAR mesh (the whole session so far) as mesh/room-N.ply
+  private func exportMesh() async {
     let anchors = arSession.currentFrame?.anchors.compactMap { $0 as? ARMeshAnchor } ?? []
     let index = roomIndex
     let url = folder.appendingPathComponent("mesh/room-\(index).ply")
-    Task {
-      let record = await Task.detached(priority: .userInitiated) { () -> MeshRecord? in
-        guard !anchors.isEmpty, var r = try? MeshExporter.writePLY(anchors: anchors, to: url) else { return nil }
-        r.file = "mesh/room-\(index).ply"
-        return r
-      }.value
-      self.roomMeshRecord = record
-      self.meshFaces = record?.faces ?? 0
-      self.roomCaptureView.captureSession.stop(pauseARSession: false)
-    }
+    let record = await Task.detached(priority: .userInitiated) { () -> MeshRecord? in
+      guard !anchors.isEmpty, var r = try? MeshExporter.writePLY(anchors: anchors, to: url) else { return nil }
+      r.file = "mesh/room-\(index).ply"
+      return r
+    }.value
+    roomMeshRecord = record
+    meshFaces = record?.faces ?? 0
   }
 
   /// RoomPlan's raw capture data, so RoomBuilder can be re-run on it later
@@ -138,6 +148,11 @@ final class CaptureController: NSObject, ObservableObject {
   private func roomProcessed(_ room: CapturedRoom, error: Error?) async {
     guard phase == .processingRoom || phase == .scanning else { return }
     ticker?.invalidate()
+    if phase == .scanning {
+      // RoomPlan ended the room by itself (error, tracking lost): still keep the LiDAR mesh
+      phase = .processingRoom
+      await exportMesh()
+    }
     if let error { warning = "RoomPlan: \(error.localizedDescription)" }
     let index = roomIndex
     let encoder = BundleJSON.encoder
@@ -226,32 +241,7 @@ final class CaptureController: NSObject, ObservableObject {
     try? e.encode(photos).write(to: folder.appendingPathComponent("photos/photos.json"))
     try? e.encode(depthFrames).write(to: folder.appendingPathComponent("depth/frames.json"))
     try? e.encode(manifest).write(to: folder.appendingPathComponent("manifest.json"), options: .atomic)
-    try? posesCSV().write(to: folder.appendingPathComponent("poses.csv"), atomically: true, encoding: .utf8)
-  }
-
-  /// One row per photo and depth frame: where the phone was, where it pointed, and which
-  /// photo ↔ LiDAR frame belong together. Same numbers as the JSON, easy to read.
-  private func posesCSV() -> String {
-    func f(_ v: Float) -> String { String(format: "%.3f", v) }
-    func g(_ v: Double?) -> String { v.map { String(format: "%.7f", $0) } ?? "" }
-    var rows = ["kind,file,room,timestamp,x,y,z,dir_x,dir_y,dir_z,yaw_deg,pitch_deg,manual,high_res,paired_file,latitude,longitude,gps_accuracy_m,compass_heading_deg"]
-    for p in photos {
-      let pose = p.pose ?? CameraPose(simd_float4x4(columnMajor: p.transform))
-      rows.append(["photo", p.file, "\(p.room)", String(format: "%.3f", p.timestamp),
-                   f(pose.position[0]), f(pose.position[1]), f(pose.position[2]),
-                   f(pose.direction[0]), f(pose.direction[1]), f(pose.direction[2]), f(pose.yaw), f(pose.pitch),
-                   p.manual ? "1" : "0", (p.highRes ?? false) ? "1" : "0", p.depthFrame ?? "",
-                   g(p.location?.latitude), g(p.location?.longitude), g(p.location?.horizontalAccuracy), g(p.location?.heading)]
-        .joined(separator: ","))
-    }
-    for d in depthFrames {
-      let pose = d.pose ?? CameraPose(simd_float4x4(columnMajor: d.transform))
-      rows.append(["depth", d.file, "\(d.room)", String(format: "%.3f", d.timestamp),
-                   f(pose.position[0]), f(pose.position[1]), f(pose.position[2]),
-                   f(pose.direction[0]), f(pose.direction[1]), f(pose.direction[2]), f(pose.yaw), f(pose.pitch),
-                   "", "", d.photo ?? "", "", "", "", ""].joined(separator: ","))
-    }
-    return rows.joined(separator: "\n") + "\n"
+    try? PosesCSV.make(photos: photos, depthFrames: depthFrames).write(to: folder.appendingPathComponent("poses.csv"), atomically: true, encoding: .utf8)
   }
 
   // MARK: per-frame recording
@@ -321,20 +311,34 @@ final class CaptureController: NSObject, ObservableObject {
     trail.append(spot.point)
   }
 
-  /// A sharp reference photo whenever you've moved ~0.6 m or turned ~25° and are holding steady
+  /// Automatic reference photos, the bulk of the "hundreds of photos": one whenever you've moved
+  /// ~0.4 m or turned ~17° and the view is steady enough to be sharp. A full-resolution still
+  /// is requested when possible (every ~2.5 s), otherwise the 1920×1440 video frame is kept.
   private func considerAutoPhoto(_ frame: ARFrame) {
     let pose = frame.camera.transform
-    guard writer.inFlight < 3, !highResInFlight else { return }
-    if let prev = previousPose {
-      let dt = max(0.001, frame.timestamp - prev.time)
-      // steady: < ~10°/s rotation and < 0.25 m/s
-      guard turned(pose, prev.pose) / Float(dt) < 0.17, moved(pose, prev.pose) / Float(dt) < 0.25 else { return }
-    } else { return }
+    guard writer.inFlight < 3, !highResInFlight, let prev = previousPose else { return }
+    let blur = motionBlur(frame, since: prev)
+    guard blur < Self.maxAutoBlur else { return }
     if let last = lastAutoPhoto {
-      guard frame.timestamp - last.time > 1.0, moved(pose, last.pose) > 0.6 || turned(pose, last.pose) > 0.44 else { return }
+      guard frame.timestamp - last.time > 0.8, moved(pose, last.pose) > 0.4 || turned(pose, last.pose) > 0.3 else { return }
     }
     lastAutoPhoto = (frame.timestamp, pose)
-    savePhoto(frame, manual: false, highRes: false)
+    let thermalOK = ProcessInfo.processInfo.thermalState == .nominal || ProcessInfo.processInfo.thermalState == .fair
+    if highResSupported, thermalOK, CACurrentMediaTime() - lastHighResRequest > 2.5 {
+      requestHighRes(manual: false, near: pose)
+    } else {
+      savePhoto(frame, manual: false, highRes: false, blur: blur)
+    }
+  }
+
+  /// Predicted smear in pixels (at 1920 wide) from how fast the camera turns and moves during
+  /// the exposure; assumes surfaces ~1.5 m away for the translation part.
+  private func motionBlur(_ frame: ARFrame, since prev: (time: TimeInterval, pose: simd_float4x4)) -> Float {
+    let dt = Float(max(0.001, frame.timestamp - prev.time))
+    let fx = frame.camera.intrinsics.columns.0.x * 1920 / Float(frame.camera.imageResolution.width)
+    let angular = turned(frame.camera.transform, prev.pose) / dt
+    let linear = moved(frame.camera.transform, prev.pose) / dt
+    return (angular + linear / 1.5) * fx * Float(frame.camera.exposureDuration)
   }
 
   // MARK: shutter
@@ -342,25 +346,37 @@ final class CaptureController: NSObject, ObservableObject {
   /// Full-resolution still of where you're standing (falls back to the video frame)
   func takePhoto() {
     guard phase == .scanning, !highResInFlight else { return }
-    highResInFlight = true
     flash = true
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.flash = false }
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-    arSession.captureHighResolutionFrame { [weak self] frame, _ in
+    requestHighRes(manual: true, near: nil)
+  }
+
+  /// Ask ARKit for a full-resolution still. Auto photos keep it only if it shows the view that
+  /// triggered it (the still arrives a moment later); otherwise the live video frame is used.
+  private func requestHighRes(manual: Bool, near pose: simd_float4x4?) {
+    highResInFlight = true
+    lastHighResRequest = CACurrentMediaTime()
+    arSession.captureHighResolutionFrame { [weak self] frame, error in
       DispatchQueue.main.async {
         guard let self else { return }
         self.highResInFlight = false
         guard self.phase == .scanning else { return }
-        if let frame {
-          self.savePhoto(frame, manual: true, highRes: true)
-        } else if let current = self.arSession.currentFrame {
-          self.savePhoto(current, manual: true, highRes: false)
+        if error != nil, !manual { self.highResSupported = false }
+        func sameView(_ t: simd_float4x4) -> Bool {
+          guard let pose else { return true }
+          return self.moved(t, pose) < 0.15 && self.turned(t, pose) < 0.12
+        }
+        if let frame, case .normal = frame.camera.trackingState, sameView(frame.camera.transform) {
+          self.savePhoto(frame, manual: manual, highRes: true)
+        } else if let current = self.arSession.currentFrame, manual || sameView(current.camera.transform) {
+          self.savePhoto(current, manual: manual, highRes: false)
         }
       }
     }
   }
 
-  private func savePhoto(_ frame: ARFrame, manual: Bool, highRes: Bool) {
+  private func savePhoto(_ frame: ARFrame, manual: Bool, highRes: Bool, blur: Float? = nil) {
     let file = String(format: "photos/%04d.jpg", nextPhoto)
     let geo = location.sample
     let maxEdge = manual ? Self.maxManualEdge : Self.maxAutoEdge
@@ -377,7 +393,8 @@ final class CaptureController: NSObject, ObservableObject {
       file: file, room: roomIndex, timestamp: frame.timestamp, width: Int(size.width), height: Int(size.height),
       transform: frame.camera.transform.columnMajor, intrinsics: k.columnMajor,
       tracking: Self.describe(frame.camera.trackingState), manual: manual,
-      exposure: frame.camera.exposureDuration, blurPixels: nil, pass: "scan", highRes: highRes,
+      exposure: frame.camera.exposureDuration, blurPixels: blur.map { $0 * scale * Float(frame.camera.imageResolution.width) / 1920 },
+      pass: "scan", highRes: highRes,
       camera: CameraState(exposureOffset: frame.camera.exposureOffset,
                           ambientIntensity: frame.lightEstimate.map { Float($0.ambientIntensity) },
                           colorTemperature: frame.lightEstimate.map { Float($0.ambientColorTemperature) }),
@@ -431,27 +448,5 @@ final class RoomViewDelegate: NSObject, RoomCaptureViewDelegate {
 
   func captureView(didPresent processedResult: CapturedRoom, error: (any Error)?) {
     onRoom?(processedResult, error)
-  }
-}
-
-/// A camera position + heading on the floor plan (x/z of the session world, yaw in radians,
-/// 0 = facing world -Z, counter-clockwise seen from above)
-struct MapSpot: Equatable {
-  var point: SIMD2<Float>
-  var yaw: Float
-  var manual: Bool
-
-  init(_ t: simd_float4x4, manual: Bool) {
-    point = SIMD2(t.columns.3.x, t.columns.3.z)
-    let f = -simd_make_float3(t.columns.2)
-    yaw = atan2(-f.x, -f.z)
-    self.manual = manual
-  }
-}
-
-extension simd_float4x4 {
-  init(columnMajor m: [Float]) {
-    self.init(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
-              SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15]))
   }
 }

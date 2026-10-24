@@ -64,10 +64,12 @@ final class MediaWriter: @unchecked Sendable {
       kCGImagePropertyGPSLongitudeRef as String: g.longitude >= 0 ? "E" : "W",
       kCGImagePropertyGPSHPositioningError as String: g.horizontalAccuracy,
     ]
-    utc.dateFormat = "yyyy:MM:dd"
-    d[kCGImagePropertyGPSDateStamp as String] = utc.string(from: g.timestamp)
-    utc.dateFormat = "HH:mm:ss.SS"
-    d[kCGImagePropertyGPSTimeStamp as String] = utc.string(from: g.timestamp)
+    if let time = g.timestamp {
+      utc.dateFormat = "yyyy:MM:dd"
+      d[kCGImagePropertyGPSDateStamp as String] = utc.string(from: time)
+      utc.dateFormat = "HH:mm:ss.SS"
+      d[kCGImagePropertyGPSTimeStamp as String] = utc.string(from: time)
+    }
     if let alt = g.altitude {
       d[kCGImagePropertyGPSAltitude as String] = abs(alt)
       d[kCGImagePropertyGPSAltitudeRef as String] = alt < 0 ? 1 : 0

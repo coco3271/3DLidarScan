@@ -37,3 +37,28 @@ jobs:
             || { grep -E "error:" -A3 build.log | head -150; tail -30 build.log; exit 1; }
           grep -E "warning:" build.log | sort -u | head -60 || true
           tail -3 build.log
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Synthetic scan for the tests
+        run: |
+          pip install numpy pillow
+          python3 tests/make_fake_bundle.py tests/out/FakeHouse
+      - name: Unit tests (iOS Simulator)
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in sorted(d.items(), reverse=True) if 'iOS' in k for x in v if x['name'].startswith('iPhone')))")
+          echo "simulator $UDID"
+          env TEST_RUNNER_FIXTURE_BUNDLE="$PWD/tests/out/FakeHouse" TEST_RUNNER_AI_KIT="$PWD/ai-kit" TEST_RUNNER_OUT_DIR="$PWD/tests/out" \
+            xcodebuild test -project ios/LidarWalkthrough.xcodeproj -scheme LidarWalkthroughTests -destination "id=$UDID" \
+            CODE_SIGNING_ALLOWED=NO > test.log 2>&1 \
+            || { grep -E "error|failed|XCTAssert|Skipped" test.log | head -150; tail -40 test.log; exit 1; }
+          grep -E "Test Case .* (passed|failed|skipped)|Executed" test.log | tail -30
+          ! grep -qE "Test Case .* skipped" test.log || { echo "tests were skipped (fixture not visible to the simulator?)"; exit 1; }
+          test -s tests/out/swift-walkthrough.html
+      - name: The walkthrough built by the app's Swift code opens in a browser
+        run: |
+          cd tests && npm install && npx playwright-core install chromium && cd ..
+          EXTRA_ONLY=1 EXTRA_HTML="$PWD/tests/out/swift-walkthrough.html" node tests/e2e.mjs tests/out

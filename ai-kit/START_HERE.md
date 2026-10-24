@@ -90,9 +90,16 @@ cameras (`position`, `forward`, `up`, `fovY`). Then:
 2. **Model the furniture** from the RoomPlan boxes (treat them as bounds, not shapes) and
    from the photos (shape, material, color). Look at the photos. Make materials and colors
    match what's visible: floors, wall paint, cabinets, counters, fixtures.
-3. **Compare with the photos.** Render the model from each tour photo's camera pose
-   (position, forward, up, fovY) and put it next to the photo. Fix the biggest mismatch,
-   then repeat.
+3. **Compare with the photos, and iterate.** Render the model from each tour photo's camera
+   pose (position, forward, up, fovY) and put it next to the photo. Fix the biggest mismatch,
+   then repeat until they agree. Keep going past "close enough": shapes, materials,
+   textures, small objects. The baseline walkthrough already does this framing:
+   `walkthrough.html#photo=N&ui=0&layers=mesh` shows the LiDAR scan from photo N's exact
+   camera, with the same position, orientation and field of view, no UI, and a 3:4 window
+   matches the upright photo. `&overlay=0.5` blends the photo on top. With a headless
+   browser (Playwright, agent-browser) that gives you photo-vs-scan pairs to measure
+   against. Use the same pose math for your own model.
+
 4. **Deliver** a single self-contained HTML file. Inline three.js (or use one pinned CDN URL).
    Include dollhouse and first-person controls with touch support, clickable photo spots
    that fly the camera to the photo pose and show the photo, and room labels from

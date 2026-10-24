@@ -43,3 +43,28 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown]
         ITSAppUsesNonExemptEncryption: false
+  # Logic tests (no LiDAR needed): compile the app's own sources that don't touch RoomPlan and
+  # run in the iOS Simulator. CI passes a synthetic scan in with TEST_RUNNER_FIXTURE_BUNDLE.
+  LidarWalkthroughTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LidarWalkthroughTests
+      - path: LidarWalkthrough/Models.swift
+      - path: LidarWalkthrough/PropertyStore.swift
+      - path: LidarWalkthrough/FloorPlan.swift
+      - path: LidarWalkthrough/MediaWriter.swift
+      - path: LidarWalkthrough/MeshExporter.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.coco3271.lidarwalkthrough.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  LidarWalkthroughTests:
+    build:
+      targets:
+        LidarWalkthroughTests: [test]
+    test:
+      targets: [LidarWalkthroughTests]
+

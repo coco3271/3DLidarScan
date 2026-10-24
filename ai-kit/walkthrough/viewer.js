@@ -202,6 +202,20 @@ export async function startWalkthrough(THREE, container, source) {
   const joy = { x: 0, y: 0 }
   let tourIndex = -1
   let anim = null
+  let exact = null // the photo's own camera (pose incl. roll + field of view) while in the tour
+  const WALK_FOV = 70
+  const MOVE_KEYS = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']
+  const Z_AXIS = new THREE.Vector3(0, 0, 1)
+  const tmpDir = new THREE.Vector3()
+
+  /** The camera that took photo p: ARKit pose, turned upright (image up = sensor -X), vertical FOV from fx */
+  function photoCamera(p) {
+    const m = new THREE.Matrix4().fromArray(p.transform)
+    const pos = new THREE.Vector3().setFromMatrixPosition(m)
+    const quat = new THREE.Quaternion().setFromRotationMatrix(m).multiply(new THREE.Quaternion().setFromAxisAngle(Z_AXIS, Math.PI / 2))
+    const fov = THREE.MathUtils.radToDeg(2 * Math.atan(p.width / 2 / p.intrinsics[0]))
+    return { pos, quat, fov }
+  }
 
   function setWalkFromPhoto(p) {
     const t = p.transform
@@ -212,32 +226,27 @@ export async function startWalkthrough(THREE, container, source) {
   }
 
   function setMode(m) {
+    if (m !== 'tour') { exact = null; anim = null; ui.overlay.hidden = true }
     mode = m
     ui.root.dataset.mode = m
     for (const b of ui.modeButtons) b.classList.toggle('on', b.dataset.mode === m)
     if (scanMesh) scanMesh.setDollhouse(m === 'dollhouse')
     layers.photos.visible = ui.toggles.photos.checked && m === 'dollhouse'
     if (m !== 'tour') ui.photoPanel.hidden = true
-    if (m === 'tour' && tourIndex < 0 && tour.length) goToPhoto(0)
+    if (m === 'tour' && !exact && tour.length) goToPhoto(Math.max(0, tourIndex))
   }
 
   function goToPhoto(i) {
     if (!tour.length) return
     tourIndex = (i + tour.length) % tour.length
     const p = tour[tourIndex]
-    const from = { pos: walk.pos.clone(), yaw: walk.yaw, pitch: walk.pitch }
-    setWalkFromPhoto(p)
-    const to = { pos: walk.pos.clone(), yaw: walk.yaw, pitch: walk.pitch }
-    if (mode !== 'dollhouse') {
-      // shortest yaw path
-      let dy = to.yaw - from.yaw
-      while (dy > Math.PI) dy -= 2 * Math.PI
-      while (dy < -Math.PI) dy += 2 * Math.PI
-      to.yaw = from.yaw + dy
-      anim = { from, to, t0: performance.now(), dur: 900 }
-      Object.assign(walk, { pos: from.pos.clone(), yaw: from.yaw, pitch: from.pitch })
-    }
-    if (mode === 'dollhouse') setMode('tour')
+    const target = photoCamera(p)
+    // fly from wherever the camera is now (a dollhouse jump lands directly)
+    const from = mode === 'dollhouse' ? null : { pos: camera.position.clone(), quat: camera.quaternion.clone(), fov: camera.fov }
+    setWalkFromPhoto(p) // leaving the tour continues walking from this spot
+    if (mode !== 'tour') setMode('tour')
+    exact = target
+    anim = from && { from, t0: performance.now(), dur: 900 }
     showPhoto(p)
   }
 
@@ -258,10 +267,19 @@ export async function startWalkthrough(THREE, container, source) {
       p.note ? esc(p.note) : '',
     ].filter(Boolean).join(' · ')
     ui.photoImg.removeAttribute('src')
+    ui.overlay.removeAttribute('src')
     if (has.has(p.file)) {
       const url = URL.createObjectURL(new Blob([await source.read(p.file)], { type: 'image/jpeg' }))
-      if (tour[tourIndex] === p) ui.photoImg.src = url
+      if (tour[tourIndex] === p) { ui.photoImg.src = url; ui.overlay.src = url }
     }
+    applyOverlay()
+  }
+
+  // photo-over-model comparison: the 3D camera matches the photo's, so they line up
+  function applyOverlay() {
+    const v = +ui.overlaySlider.value / 100
+    ui.overlay.hidden = mode !== 'tour' || v <= 0
+    ui.overlay.style.opacity = v
   }
 
   // pointer handling: drag = look (walk/tour) or orbit (dollhouse); pinch/wheel = zoom
@@ -297,6 +315,7 @@ export async function startWalkthrough(THREE, container, source) {
         orbit.pitch = clamp(orbit.pitch + dy * 0.006, 0.05, 1.5)
       }
     } else {
+      if (mode === 'tour') setMode('walk') // looking around leaves the photo's exact view
       anim = null
       walk.yaw += dx * 0.004
       walk.pitch = clamp(walk.pitch + dy * 0.004, -1.4, 1.4)
@@ -317,8 +336,9 @@ export async function startWalkthrough(THREE, container, source) {
     return Math.hypot(a.x - b.x, a.y - b.y)
   }
   function zoom(f) {
-    if (mode === 'dollhouse') orbit.dist = clamp(orbit.dist * f, 0.5, radius * 6)
-    else walk.pos.addScaledVector(lookDir(), (1 - f) * 3)
+    if (mode === 'dollhouse') return void (orbit.dist = clamp(orbit.dist * f, 0.5, radius * 6))
+    if (mode === 'tour') setMode('walk')
+    walk.pos.addScaledVector(lookDir(), (1 - f) * 3)
   }
   function lookDir() {
     return new THREE.Vector3(-Math.sin(walk.yaw) * Math.cos(walk.pitch), Math.sin(walk.pitch), -Math.cos(walk.yaw) * Math.cos(walk.pitch))
@@ -342,7 +362,11 @@ export async function startWalkthrough(THREE, container, source) {
       }
     }
   }
-  addEventListener('keydown', (e) => { if (!e.target.closest?.('input,textarea')) keys.add(e.code) })
+  addEventListener('keydown', (e) => {
+    // typing in a text field shouldn't walk; sliders and checkboxes keep focus after a tap, so they don't count
+    if (e.target.closest?.('textarea,input:not([type=range]):not([type=checkbox])')) return
+    keys.add(e.code)
+  })
   addEventListener('keyup', (e) => keys.delete(e.code))
 
   // on-screen joystick (phones)
@@ -365,6 +389,7 @@ export async function startWalkthrough(THREE, container, source) {
   ui.prev.onclick = () => goToPhoto(tourIndex - 1)
   ui.next.onclick = () => goToPhoto(tourIndex + 1)
   ui.closePhoto.onclick = () => { ui.photoPanel.hidden = true }
+  ui.overlaySlider.oninput = applyOverlay
   for (const [name, input] of Object.entries(ui.toggles)) {
     input.onchange = () => { layers[name].visible = input.checked && (name !== 'photos' || mode === 'dollhouse') }
   }
@@ -380,6 +405,26 @@ export async function startWalkthrough(THREE, container, source) {
     geo?.latitude != null ? `${geo.latitude.toFixed(5)}, ${geo.longitude.toFixed(5)}` : '',
   ].filter(Boolean).join(' · ')
   setMode('dollhouse')
+  const view = { scene, camera, setMode, goToPhoto, tour, get mode() { return mode }, get tourIndex() { return tourIndex } }
+  applyHash()
+  addEventListener('hashchange', applyHash)
+
+  function applyHash() {
+    const q = new URLSearchParams(location.hash.slice(1))
+    if (q.get('ui') === '0') ui.root.dataset.ui = '0'
+    if (q.has('layers')) {
+      const on = new Set(q.get('layers').split(','))
+      for (const [name, input] of Object.entries(ui.toggles)) { input.checked = on.has(name) && !input.disabled; input.onchange() }
+    }
+    if (q.has('overlay')) ui.overlaySlider.value = Math.round(clamp(+q.get('overlay') || 0, 0, 1) * 100)
+    const want = q.get('photo')
+    if (want != null && tour.length) {
+      const byFile = tour.findIndex((p) => p.file === want || p.file.endsWith('/' + want))
+      const i = byFile >= 0 ? byFile : +want
+      if (Number.isInteger(i) && i >= 0 && i < tour.length) { goToPhoto(i); anim = null }
+    } else if (q.get('mode')) setMode(q.get('mode'))
+    applyOverlay()
+  }
 
   // ---- render loop ---------------------------------------------------------------------------
   let last = performance.now()
@@ -392,20 +437,29 @@ export async function startWalkthrough(THREE, container, source) {
       camera.aspect = w / Math.max(1, h)
       camera.updateProjectionMatrix()
     }
+    // walking (keys / joystick) from a photo's exact view continues on foot from there
+    if (mode === 'tour' && (joy.x || joy.y || MOVE_KEYS.some((k) => keys.has(k)))) setMode('walk')
     if (mode === 'dollhouse') {
       camera.position.set(
         orbit.target.x + orbit.dist * Math.cos(orbit.pitch) * Math.sin(orbit.yaw),
         orbit.target.y + orbit.dist * Math.sin(orbit.pitch),
         orbit.target.z + orbit.dist * Math.cos(orbit.pitch) * Math.cos(orbit.yaw))
       camera.lookAt(orbit.target)
-    } else {
+    } else if (mode === 'tour' && exact) {
+      let fov = exact.fov
+      camera.position.copy(exact.pos)
+      camera.quaternion.copy(exact.quat)
       if (anim) {
         const k = Math.min(1, (now - anim.t0) / anim.dur), s = k * k * (3 - 2 * k)
-        walk.pos.lerpVectors(anim.from.pos, anim.to.pos, s)
-        walk.yaw = anim.from.yaw + (anim.to.yaw - anim.from.yaw) * s
-        walk.pitch = anim.from.pitch + (anim.to.pitch - anim.from.pitch) * s
+        camera.position.lerpVectors(anim.from.pos, exact.pos, s)
+        camera.quaternion.slerpQuaternions(anim.from.quat, exact.quat, s)
+        fov = anim.from.fov + (exact.fov - anim.from.fov) * s
         if (k >= 1) anim = null
       }
+      if (camera.fov !== fov) { camera.fov = fov; camera.updateProjectionMatrix() }
+    }
+    if (mode !== 'dollhouse' && !(mode === 'tour' && exact)) {
+      if (camera.fov !== WALK_FOV) { camera.fov = WALK_FOV; camera.updateProjectionMatrix() }
       const fwd = new THREE.Vector3(-Math.sin(walk.yaw), 0, -Math.cos(walk.yaw))
       const right = new THREE.Vector3(-fwd.z, 0, fwd.x)
       let f = -joy.y, r = joy.x
@@ -417,15 +471,15 @@ export async function startWalkthrough(THREE, container, source) {
       if (keys.has('ArrowRight')) walk.yaw -= dt * 1.8
       if (f || r) {
         anim = null
-        if (mode === 'tour') setMode('walk')
         walk.pos.addScaledVector(fwd, f * dt * 1.4).addScaledVector(right, r * dt * 1.4)
         walk.pos.y += (floorY + EYE_HEIGHT - walk.pos.y) * Math.min(1, dt * 4) // settle to eye height
       }
       camera.position.copy(walk.pos)
       camera.rotation.set(walk.pitch, walk.yaw, 0)
     }
-    const look = lookDir()
-    minimap.draw(mode === 'dollhouse' ? null : { x: camera.position.x, z: camera.position.z, fx: look.x, fz: look.z }, tourIndex)
+    if (mode === 'dollhouse' && camera.fov !== WALK_FOV) { camera.fov = WALK_FOV; camera.updateProjectionMatrix() }
+    const look = camera.getWorldDirection(tmpDir)
+    minimap.draw(mode === 'dollhouse' ? null : { x: camera.position.x, z: camera.position.z, fx: look.x, fz: look.z }, mode === 'tour' ? tourIndex : -1)
     renderer.render(scene, camera)
     requestAnimationFrame(frame)
   }
@@ -441,7 +495,7 @@ export async function startWalkthrough(THREE, container, source) {
     }
   }
   status('')
-  return { scene, camera, setMode, goToPhoto }
+  return view
 }
 
 // ---- LiDAR mesh ---------------------------------------------------------------------------------
@@ -831,6 +885,10 @@ function buildUI(container) {
   .wt-knob{position:absolute;left:33px;top:33px;width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.5);pointer-events:none}
   .wt[data-mode=walk] .wt-joy,.wt[data-mode=tour] .wt-joy{display:block}
   .wt-help{font-size:11px;opacity:.6}
+  .wt-overlay{position:absolute;top:0;left:50%;height:100%;transform:translateX(-50%);pointer-events:none;image-orientation:from-image}
+  .wt-overlay[hidden]{display:none}
+  .wt-photo .ov{display:flex;gap:8px;align-items:center;font-size:12px;margin-top:6px}.wt-photo .ov input{flex:1}
+  .wt[data-ui="0"] .wt-top,.wt[data-ui="0"] .wt-layers,.wt[data-ui="0"] .wt-photo,.wt[data-ui="0"] .wt-map,.wt[data-ui="0"] .wt-joy,.wt[data-ui="0"] .wt-status{display:none!important}
   .wt-map{position:absolute;right:12px;top:72px;width:190px;height:190px;border-radius:12px;background:rgba(20,22,28,.78);border:1px solid rgba(255,255,255,.1);cursor:crosshair}
   @media (hover:hover){.wt-joy{opacity:.5}}
   .wt-photo img{max-height:calc(100vh - 470px);min-height:120px;object-fit:contain}
@@ -846,6 +904,7 @@ function buildUI(container) {
   root.className = 'wt'
   root.innerHTML = `
     <div class="wt-stage"></div>
+    <img class="wt-overlay" alt="" hidden>
     <div class="wt-top">
       <div class="wt-card"><div class="wt-title"></div><div class="wt-sub"></div></div>
       <div class="wt-card wt-modes">
@@ -865,6 +924,7 @@ function buildUI(container) {
     <div class="wt-card wt-photo" hidden>
       <img alt="Photo taken at this spot">
       <div class="meta"></div>
+      <label class="ov">Compare <input type="range" min="0" max="100" value="0" class="wt-ov" aria-label="Overlay the photo on the 3D view"></label>
       <div class="row"><button data-act="prev">‹ Prev</button><span class="count"></span><button data-act="next">Next ›</button><button data-act="close">✕</button></div>
     </div>`
   container.append(style, root)
@@ -876,5 +936,6 @@ function buildUI(container) {
     photoPanel: q('.wt-photo'), photoImg: q('.wt-photo img'), photoMeta: q('.wt-photo .meta'), photoCounter: q('.wt-photo .count'),
     prev: q('[data-act=prev]'), next: q('[data-act=next]'), closePhoto: q('[data-act=close]'),
     joystick: q('.wt-joy'), knob: q('.wt-knob'), map: q('.wt-map'),
+    overlay: q('.wt-overlay'), overlaySlider: q('.wt-ov'),
   }
 }

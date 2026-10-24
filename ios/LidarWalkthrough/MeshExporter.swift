@@ -10,70 +10,107 @@ import Metal
 /// Colors are left neutral: the walkthrough viewer paints the mesh from the photos.
 enum MeshExporter {
   static func writePLY(anchors: [ARMeshAnchor], to url: URL) throws -> MeshRecord {
-    let vertexCount = anchors.reduce(0) { $0 + $1.geometry.vertices.count }
-    let faceCount = anchors.reduce(0) { $0 + $1.geometry.faces.count }
+    var record = try writePLY(pieces: anchors.map(AnchorPiece.init), to: url)
+    record.anchors = anchors.count
+    return record
+  }
+
+  /// Several meshes concatenated into one PLY; each piece's face indices are offset past the
+  /// vertices of the pieces before it.
+  static func writePLY(pieces: [any MeshPiece], to url: URL) throws -> MeshRecord {
+    let vertexCount = pieces.reduce(0) { $0 + $1.vertexCount }
+    let faceCount = pieces.reduce(0) { $0 + $1.faceCount }
     var header = "ply\nformat binary_little_endian 1.0\ncomment 3D LiDAR Scan: ARKit world space, meters, +Y up\n"
     header += "element vertex \(vertexCount)\nproperty float x\nproperty float y\nproperty float z\n"
     header += "property float nx\nproperty float ny\nproperty float nz\nproperty float coverage\n"
     header += "property uchar red\nproperty uchar green\nproperty uchar blue\nproperty uchar inroom\n"
     header += "element face \(faceCount)\nproperty list uchar uint vertex_indices\nproperty uchar class\nend_header\n"
 
-    FileManager.default.createFile(atPath: url.path, contents: nil)
+    guard FileManager.default.createFile(atPath: url.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
     let handle = try FileHandle(forWritingTo: url)
     defer { try? handle.close() }
     var out = ByteWriter(handle: handle)
     out.data.append(Data(header.utf8))
 
-    for anchor in anchors {
-      let g = anchor.geometry
-      let m = anchor.transform
-      let r = simd_float3x3(simd_make_float3(m.columns.0), simd_make_float3(m.columns.1), simd_make_float3(m.columns.2))
-      let v = g.vertices, n = g.normals
-      let vBase = v.buffer.contents().advanced(by: v.offset)
-      let nBase = n.buffer.contents().advanced(by: n.offset)
-      for i in 0..<v.count {
-        let p = vBase.advanced(by: i * v.stride)
-        let local = simd_float4(p.load(as: Float.self), p.load(fromByteOffset: 4, as: Float.self), p.load(fromByteOffset: 8, as: Float.self), 1)
-        let world = m * local
-        var normal = simd_float3(0, 1, 0)
-        if i < n.count {
-          let q = nBase.advanced(by: i * n.stride)
-          normal = simd_normalize(r * simd_float3(q.load(as: Float.self), q.load(fromByteOffset: 4, as: Float.self), q.load(fromByteOffset: 8, as: Float.self)))
-        }
-        out.f32(world.x); out.f32(world.y); out.f32(world.z)
-        out.f32(normal.x); out.f32(normal.y); out.f32(normal.z)
+    for piece in pieces {
+      for i in 0..<piece.vertexCount {
+        let (p, n) = piece.vertex(i)
+        out.f32(p.x); out.f32(p.y); out.f32(p.z)
+        out.f32(n.x); out.f32(n.y); out.f32(n.z)
         out.f32(0) // coverage
         out.u8(200); out.u8(200); out.u8(200); out.u8(1)
         try out.flushIfNeeded()
       }
     }
-
     var offset: UInt32 = 0
-    for anchor in anchors {
-      let g = anchor.geometry
-      let f = g.faces
-      let fBase = f.buffer.contents()
-      let perFace = f.indexCountPerPrimitive
-      let classes = g.classification
-      let cBase = classes.map { $0.buffer.contents().advanced(by: $0.offset) }
-      for i in 0..<f.count {
+    for piece in pieces {
+      for i in 0..<piece.faceCount {
+        let (a, b, c, cls) = piece.face(i)
         out.u8(3)
-        for k in 0..<3 {
-          let at = (i * perFace + k) * f.bytesPerIndex
-          let index: UInt32 = f.bytesPerIndex == 2
-            ? UInt32(fBase.load(fromByteOffset: at, as: UInt16.self))
-            : fBase.load(fromByteOffset: at, as: UInt32.self)
-          out.u32(index + offset)
-        }
-        var cls: UInt8 = 0
-        if let classes, let cBase, i < classes.count { cls = cBase.load(fromByteOffset: i * classes.stride, as: UInt8.self) }
+        out.u32(a + offset); out.u32(b + offset); out.u32(c + offset)
         out.u8(cls)
         try out.flushIfNeeded()
       }
-      offset += UInt32(g.vertices.count)
+      offset += UInt32(piece.vertexCount)
     }
     try out.flush()
-    return MeshRecord(file: "", anchors: anchors.count, vertices: vertexCount, faces: faceCount)
+    return MeshRecord(file: "", anchors: pieces.count, vertices: vertexCount, faces: faceCount)
+  }
+}
+
+/// One mesh in world space
+protocol MeshPiece {
+  var vertexCount: Int { get }
+  var faceCount: Int { get }
+  /// world-space position and unit normal
+  func vertex(_ i: Int) -> (SIMD3<Float>, SIMD3<Float>)
+  /// triangle vertex indices (local to this piece) and ARMeshClassification raw value
+  func face(_ i: Int) -> (UInt32, UInt32, UInt32, UInt8)
+}
+
+/// An ARMeshAnchor read straight from its Metal buffers, moved into world space
+struct AnchorPiece: MeshPiece {
+  private let geometry: ARMeshGeometry
+  private let transform: simd_float4x4
+  private let rotation: simd_float3x3
+
+  init(_ anchor: ARMeshAnchor) {
+    geometry = anchor.geometry
+    transform = anchor.transform
+    let m = anchor.transform
+    rotation = simd_float3x3(simd_make_float3(m.columns.0), simd_make_float3(m.columns.1), simd_make_float3(m.columns.2))
+  }
+
+  var vertexCount: Int { geometry.vertices.count }
+  var faceCount: Int { geometry.faces.count }
+
+  func vertex(_ i: Int) -> (SIMD3<Float>, SIMD3<Float>) {
+    let v = geometry.vertices
+    // float3 sources are packed 12-byte records: read the components, never a 16-byte SIMD3
+    let p = v.buffer.contents().advanced(by: v.offset + i * v.stride)
+    let world = transform * simd_float4(p.load(as: Float.self), p.load(fromByteOffset: 4, as: Float.self), p.load(fromByteOffset: 8, as: Float.self), 1)
+    var normal = SIMD3<Float>(0, 1, 0)
+    let n = geometry.normals
+    if i < n.count {
+      let q = n.buffer.contents().advanced(by: n.offset + i * n.stride)
+      let local = SIMD3<Float>(q.load(as: Float.self), q.load(fromByteOffset: 4, as: Float.self), q.load(fromByteOffset: 8, as: Float.self))
+      if simd_length(local) > 0 { normal = simd_normalize(rotation * local) }
+    }
+    return (SIMD3(world.x, world.y, world.z), normal)
+  }
+
+  func face(_ i: Int) -> (UInt32, UInt32, UInt32, UInt8) {
+    let f = geometry.faces
+    let base = f.buffer.contents()
+    func index(_ k: Int) -> UInt32 {
+      let at = (i * f.indexCountPerPrimitive + k) * f.bytesPerIndex
+      return f.bytesPerIndex == 2 ? UInt32(base.load(fromByteOffset: at, as: UInt16.self)) : base.load(fromByteOffset: at, as: UInt32.self)
+    }
+    var cls: UInt8 = 0
+    if let c = geometry.classification, i < c.count {
+      cls = c.buffer.contents().load(fromByteOffset: c.offset + i * c.stride, as: UInt8.self)
+    }
+    return (index(0), index(1), index(2), cls)
   }
 }
 

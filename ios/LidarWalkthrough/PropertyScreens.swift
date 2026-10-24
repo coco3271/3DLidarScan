@@ -151,7 +151,8 @@ struct PropertyDetailScreen: View {
     exporting = "Preparing…"
     defer { exporting = nil }
     do {
-      let url = try await ScanExporter.zip(scan.url) { step in Task { @MainActor in exporting = step } }
+      // a late progress message must not bring the spinner back after the export finished
+      let url = try await ScanExporter.zip(scan.url) { step in Task { @MainActor in if exporting != nil { exporting = step } } }
       share = ShareItem(url: url)
     } catch {
       self.error = error.localizedDescription

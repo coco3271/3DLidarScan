@@ -155,7 +155,7 @@ struct GeoSample: Codable {
   var heading: Double?
   var headingAccuracy: Double?
   var floor: Int?
-  var timestamp: Date
+  var timestamp: Date?
 
   init(_ location: CLLocation, heading: CLHeading?) {
     latitude = location.coordinate.latitude
@@ -227,5 +227,56 @@ extension UIDevice {
     return withUnsafeBytes(of: &info.machine) { buf in
       String(decoding: buf.prefix { $0 != 0 }, as: UTF8.self)
     }
+  }
+}
+
+/// A camera position + heading on the floor plan (x/z of the session world, yaw in radians,
+/// 0 = facing world -Z, counter-clockwise seen from above)
+struct MapSpot: Equatable {
+  var point: SIMD2<Float>
+  var yaw: Float
+  var manual: Bool
+
+  init(_ t: simd_float4x4, manual: Bool) {
+    point = SIMD2(t.columns.3.x, t.columns.3.z)
+    let f = -simd_make_float3(t.columns.2)
+    yaw = atan2(-f.x, -f.z)
+    self.manual = manual
+  }
+}
+
+extension simd_float4x4 {
+  init(columnMajor m: [Float]) {
+    self.init(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
+              SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15]))
+  }
+}
+
+/// poses.csv: one row per photo and depth frame with where the phone was, where it pointed,
+/// and which photo ↔ LiDAR frame belong together. Same numbers as the JSON, easy to read.
+enum PosesCSV {
+  static let header = "kind,file,room,timestamp,x,y,z,dir_x,dir_y,dir_z,yaw_deg,pitch_deg,manual,high_res,paired_file,latitude,longitude,gps_accuracy_m,compass_heading_deg"
+
+  static func make(photos: [PhotoRecord], depthFrames: [DepthRecord]) -> String {
+    func f(_ v: Float) -> String { String(format: "%.3f", v) }
+    func g(_ v: Double?) -> String { v.map { String(format: "%.7f", $0) } ?? "" }
+    func poseColumns(_ pose: CameraPose) -> [String] {
+      [f(pose.position[0]), f(pose.position[1]), f(pose.position[2]),
+       f(pose.direction[0]), f(pose.direction[1]), f(pose.direction[2]), f(pose.yaw), f(pose.pitch)]
+    }
+    var rows = [header]
+    for p in photos {
+      let pose = p.pose ?? CameraPose(simd_float4x4(columnMajor: p.transform))
+      rows.append((["photo", p.file, "\(p.room)", String(format: "%.3f", p.timestamp)] + poseColumns(pose) +
+                   [p.manual ? "1" : "0", (p.highRes ?? false) ? "1" : "0", p.depthFrame ?? "",
+                    g(p.location?.latitude), g(p.location?.longitude), g(p.location?.horizontalAccuracy), g(p.location?.heading)])
+        .joined(separator: ","))
+    }
+    for d in depthFrames {
+      let pose = d.pose ?? CameraPose(simd_float4x4(columnMajor: d.transform))
+      rows.append((["depth", d.file, "\(d.room)", String(format: "%.3f", d.timestamp)] + poseColumns(pose) +
+                   ["", "", d.photo ?? "", "", "", "", ""]).joined(separator: ","))
+    }
+    return rows.joined(separator: "\n") + "\n"
   }
 }
