@@ -10,7 +10,38 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-command -v xcodebuild >/dev/null || { echo "Xcode is missing: install it from the App Store, open it once, then rerun."; exit 1; }
+# --- the full Xcode app (the Command Line Tools alone can't build for or install on an iPhone) --------
+DEV_DIR=$(xcode-select -p 2>/dev/null || true)
+if [ ! -x "$DEV_DIR/usr/bin/xcodebuild" ] || [[ "$DEV_DIR" == *CommandLineTools* ]]; then
+  # use Xcode.app for this script without changing the system setting (no sudo needed)
+  XCODE_APP=$(ls -d /Applications/Xcode.app /Applications/Xcode*.app 2>/dev/null | head -1 || true)
+  if [ -z "$XCODE_APP" ]; then
+    XCODE_APP=$(mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'" 2>/dev/null | head -1 || true)
+  fi
+  if [ -z "$XCODE_APP" ]; then
+    cat <<'MSG'
+The full Xcode app isn't installed (this Mac only has the Command Line Tools, which can't
+install apps on an iPhone). Install "Xcode" from the Mac App Store, open it once and let it
+finish installing components (choose iOS when asked), then rerun this script.
+MSG
+    exit 1
+  fi
+  export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
+  echo "Using $XCODE_APP (xcode-select points at the Command Line Tools; to make Xcode the default:"
+  echo "  sudo xcode-select -s \"$DEVELOPER_DIR\")"
+fi
+XCODE_MAJOR=$(xcodebuild -version 2>/dev/null | sed -n 's/^Xcode \([0-9]*\).*/\1/p')
+if [ -z "$XCODE_MAJOR" ]; then
+  echo "Xcode isn't set up yet. Open Xcode once (accept the license, install the iOS components), or run:"
+  echo "  sudo xcodebuild -license accept && xcodebuild -runFirstLaunch"
+  exit 1
+fi
+if [ "$XCODE_MAJOR" -lt 15 ]; then
+  echo "Xcode $XCODE_MAJOR is too old (needs 15 or newer for iOS 17 / RoomPlan). Update Xcode in the App Store."
+  exit 1
+fi
+# first-launch components (device support, etc.); quick when already installed
+xcodebuild -runFirstLaunch >/dev/null 2>&1 || true
 if ! command -v xcodegen >/dev/null; then
   command -v brew >/dev/null || { echo "Install Homebrew (https://brew.sh) or XcodeGen, then rerun."; exit 1; }
   brew install xcodegen
@@ -59,9 +90,18 @@ xcodebuild -project LidarWalkthrough.xcodeproj -scheme LidarWalkthrough -configu
   -destination "id=$DEVICE" -derivedDataPath build \
   -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
   DEVELOPMENT_TEAM="$TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" CODE_SIGN_STYLE=Automatic \
-  build | grep -E "error|warning: .*(sign|provision)|BUILD (SUCCEEDED|FAILED)" || true
+  build > build.log 2>&1 || true
+grep -E "error:|warning: .*(sign|provision)|BUILD (SUCCEEDED|FAILED)" build.log | sort -u || true
 APP=build/Build/Products/Debug-iphoneos/LidarWalkthrough.app
-[ -d "$APP" ] || { echo "Build failed (see above). Opening the project in Xcode may show the signing fix: open LidarWalkthrough.xcodeproj"; exit 1; }
+if ! grep -q "BUILD SUCCEEDED" build.log || [ ! -d "$APP" ]; then
+  if grep -qiE "iOS [0-9.]+ is not installed|platform.*not installed|Unable to find a destination" build.log; then
+    echo "Xcode is missing the iOS platform for this phone. Run: xcodebuild -downloadPlatform iOS  (or Xcode › Settings › Components), then rerun."
+  elif grep -qiE "No Account for Team|No signing certificate|requires a development team|provisioning profile" build.log; then
+    echo "Signing problem: in Xcode › Settings › Accounts make sure your Apple ID is signed in, then rerun."
+  fi
+  echo "Build failed; full log: ios/build.log. You can also open ios/LidarWalkthrough.xcodeproj in Xcode and press Run."
+  exit 1
+fi
 
 xcrun devicectl device install app --device "$DEVICE" "$APP"
 if ! xcrun devicectl device process launch --device "$DEVICE" "$BUNDLE_ID"; then

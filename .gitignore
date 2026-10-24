@@ -11,3 +11,5 @@ captures/
 *.zip
 walkthrough.html
 tests/out/
+ios/build/
+ios/build.log
