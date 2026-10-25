@@ -6,6 +6,8 @@
 //      next/prev, the compare overlay, layer toggles
 //   4. for every tour photo, a render from that photo's camera (#photo=N&ui=0&layers=mesh) is saved
 //      as pose-N.png with pose-index.json; tests/compare_poses.py checks they match the photos
+//   5. the clean model (make_model.py): builds, cuts away near walls, walk/photo modes, renders
+//      from each photo camera (model-pose-N.png, checked by compare_poses.py too)
 //
 // usage: node tests/e2e.mjs <out-dir>   (expects the files tests/run.sh creates there)
 import { chromium } from 'playwright-core'
@@ -205,6 +207,94 @@ console.log('renders from each photo camera')
   writeFileSync(path.join(out, 'pose-index.json'), JSON.stringify(tour))
   check(errors.length === 0 && tour.length > 0, `${tour.length} photo-camera renders saved`)
   await page.close()
+}
+
+// ---- 5. the clean model (make_model.py): loads, looks like a dollhouse, all modes work -----------
+console.log('clean model (make_model.py)')
+{
+  const file = 'file://' + path.join(out, 'model', 'model.html')
+  const { page, errors } = await open(file)
+  const ready = await page.evaluate(() => !!window.walkthrough)
+  check(ready && errors.length === 0, `model loads without errors ${errors.join(' | ')}`)
+  const stats = await page.evaluate(() => {
+    let meshes = 0, textured = 0
+    window.walkthrough.scene.traverse((o) => {
+      if (!o.isMesh) return
+      meshes++
+      for (const m of [].concat(o.material)) if (m.map && m.map.image?.width >= 256) textured++
+    })
+    const s = window.walkthrough.spec
+    return { meshes, textured, rooms: s.rooms.length, items: s.items.length, labels: document.querySelectorAll('.hm-label').length }
+  })
+  check(stats.meshes > 40, `walls, trims, floors and furniture built (${stats.meshes} meshes)`)
+  check(stats.textured > 0, 'floor textures from the photos are applied')
+  check(stats.labels === stats.rooms, `one label per room (${stats.labels})`)
+  await page.waitForTimeout(300)
+  await page.screenshot({ path: path.join(out, 'model-dollhouse.png') })
+  // software rendering makes ambient-occlusion frames slow: turn it off for the interaction checks
+  await page.locator('.hm [data-t=quality]').setChecked(false); await page.waitForTimeout(500)
+  // the dollhouse cuts away the walls between the camera and the rooms
+  const cut = () => page.evaluate(() => { let n = 0; window.walkthrough.scene.traverse((o) => { if (o.userData.wall && !o.visible) n++ }); return n })
+  const hidden = await cut()
+  check(hidden > 0, `near walls cut away in the dollhouse (${hidden})`)
+  await page.locator('.hm [data-t=cutaway]').setChecked(false); await page.waitForTimeout(100)
+  check(await cut() === 0, 'unchecking "Cut away walls" shows them all')
+
+  await page.click('.hm-modes button[data-mode=walk]')
+  check(await page.evaluate(() => window.walkthrough.mode) === 'walk', 'model: Walk mode')
+  const eye = await page.waitForFunction(() => Math.abs(window.walkthrough.camera.position.y - 1.6) < 0.05, null, { timeout: 15000 }).then(() => true, () => false)
+  const a = await cam(page)
+  // software rendering is slow, so hold W until the walk shows (or give up after 15 s)
+  await page.keyboard.down('KeyW')
+  await page.waitForFunction((a) => Math.hypot(window.walkthrough.camera.position.x - a.x, window.walkthrough.camera.position.z - a.z) > 0.3,
+    a, { timeout: 15000 }).catch(() => {})
+  await page.keyboard.up('KeyW')
+  const b = await cam(page)
+  check(Math.hypot(b.x - a.x, b.z - a.z) > 0.3, `model: W walks forward (${Math.hypot(b.x - a.x, b.z - a.z).toFixed(2)} m)`)
+  check(eye, `model: walking at eye height (${a.y.toFixed(2)} m)`)
+  check(await page.isVisible('.hm-move') && !(await page.isVisible('.hm-photo')), 'model: touch walk buttons shown in Walk')
+  await page.screenshot({ path: path.join(out, 'model-walk.png') })
+
+  await page.click('.hm-modes button[data-mode=photo]'); await page.waitForTimeout(800)
+  const t = await page.evaluate(() => {
+    const p = window.walkthrough.spec.photos[0], c = window.walkthrough.camera
+    return { d: Math.hypot(c.position.x - p.transform[12], c.position.y - p.transform[13], c.position.z - p.transform[14]),
+             fov: c.fov, want: 2 * Math.atan(p.width / 2 / p.fx) * 180 / Math.PI }
+  })
+  check(t.d < 1e-3 && Math.abs(t.fov - t.want) < 0.01, `model: photo camera sits exactly at the photo (Δ ${t.d.toExponential(1)} m)`)
+  await page.click('.hm-photo [data-a=next]'); await page.waitForTimeout(300)
+  check(await page.textContent('.hm-photo .count') === `2 / ${await page.evaluate(() => window.walkthrough.spec.photos.length)}`, 'model: next photo')
+  await page.locator('.hm-photo .ov').fill('50')
+  check(await page.evaluate(() => { const o = document.querySelector('.hm-overlay'); return !o.hidden && +o.style.opacity === 0.5 }), 'model: compare overlay')
+  await page.screenshot({ path: path.join(out, 'model-photo.png') })
+  check(errors.length === 0, `model: no errors after interaction (${errors.join(' | ')})`)
+  await page.close()
+
+  // phone-sized: the toolbar must not cover the title
+  const phone = await open(file + '#quality=0', { width: 390, height: 844 })
+  check(phone.errors.length === 0, 'model on a phone-sized screen loads')
+  await phone.page.screenshot({ path: path.join(out, 'model-phone.png') })
+  await phone.page.close()
+
+  // renders from each photo camera for compare_poses.py (model- prefix)
+  const r = await open(file + '#ui=0&quality=0', { width: 600, height: 800 })
+  const files = await r.page.evaluate(() => window.walkthrough.spec.photos.map((p) => p.file))
+  for (let i = 0; i < files.length; i++) {
+    await r.page.evaluate((i) => window.walkthrough.goToPhoto(i), i)
+    await r.page.waitForTimeout(250)
+    await r.page.screenshot({ path: path.join(out, `model-pose-${i}.png`) })
+  }
+  writeFileSync(path.join(out, 'model-pose-index.json'), JSON.stringify(files))
+  await r.page.close()
+
+  for (const v of ['single-room', 'no-depth', 'no-photos']) {
+    const m = await open('file://' + path.join(out, 'variants', `${v}-model`, 'model.html') + '#quality=0')
+    const ok = await m.page.evaluate(() => !!window.walkthrough)
+    check(ok && m.errors.length === 0, `${v}: model loads without errors ${m.errors.join(' | ')}`)
+    if (v === 'no-photos') check(await m.page.isDisabled('.hm-modes button[data-mode=photo]'), 'no-photos: model photo mode disabled')
+    await m.page.screenshot({ path: path.join(out, 'variants', `${v}-model.png`) })
+    await m.page.close()
+  }
 }
 
 await browser.close()

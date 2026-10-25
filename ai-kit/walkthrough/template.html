@@ -14,9 +14,10 @@ const mod = (b64) => import(URL.createObjectURL(new Blob([bytes(b64)], { type: '
 try {
   const [THREE, viewer] = await Promise.all([mod(data.three), mod(data.viewer)])
   const source = { files: Object.keys(data.files), read: async (p) => { const v = data.files[p]; if (v == null) throw new Error('missing ' + p); return bytes(v).buffer } }
-  window.walkthrough = await viewer.startWalkthrough(THREE, document.getElementById('app'), source)
+  // data.entry picks the viewer's start function (make_model.py: startModel)
+  window.walkthrough = await viewer[data.entry || 'startWalkthrough'](THREE, document.getElementById('app'), source)
 } catch (e) {
-  const el = document.getElementById('err'); el.style.display = 'block'; el.textContent = 'Could not open the walkthrough: ' + (e.stack || e)
+  const el = document.getElementById('err'); el.style.display = 'block'; el.textContent = 'Could not open the 3D view: ' + (e.stack || e)
   console.error(e)
 }
 </script></body></html>

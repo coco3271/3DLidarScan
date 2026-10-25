@@ -12,7 +12,7 @@ The export uses the `house-capture/5` bundle format and the `scan-to-threejs` wo
 agent skill read these scans unchanged, and a copy of them ships inside every zip.
 
 ```
-iPhone app ──► Scan.zip ──► Claude / ChatGPT (+ PROMPT)  ──► walkthrough.html, refined three.js model
+iPhone app ──► Scan.zip ──► Claude / ChatGPT (+ PROMPT)  ──► model.html (clean dollhouse model), walkthrough.html
                   │
                   └──────► web/index.html or the included walkthrough.html (any device, Android too)
 ```
@@ -22,7 +22,7 @@ iPhone app ──► Scan.zip ──► Claude / ChatGPT (+ PROMPT)  ──► w
 | Path | What it is |
 |---|---|
 | `ios/` | The iPhone/iPad app (SwiftUI, RoomPlan, ARKit, CoreLocation) |
-| `ai-kit/` | Ships inside the app and is copied into every zip as `_ai/`: `START_HERE.md` (instructions for the AI), `PROMPT.txt`, `make_walkthrough.py`, the walkthrough viewer, and the vendored `scan-to-threejs` skill and scripts |
+| `ai-kit/` | Ships inside the app and is copied into every zip as `_ai/`: `START_HERE.md` (instructions for the AI), `PROMPT.txt`, `make_model.py` + `model/house.js` (the clean dollhouse model), `make_walkthrough.py` + the walkthrough viewer (the raw scan), and the vendored `scan-to-threejs` skill and scripts |
 | `web/index.html` | Web viewer: open a scan zip in any browser (phone or desktop, Android included). Nothing is uploaded |
 | `tests/` | End-to-end test without a phone: builds a synthetic scan, runs every script, and renders the walkthrough in headless Chromium |
 
@@ -100,10 +100,28 @@ On My iPhone › 3D LiDAR Scan.
    and file uploads.
 2. Tap **Copy AI prompt** in the app and paste it. The text is in `ai-kit/PROMPT.txt`.
 3. The AI reads `START_HERE.md` inside the zip. It first runs
-   `python3 _ai/make_walkthrough.py .`, which returns a working walkthrough immediately. It
-   then follows the scan-to-threejs workflow to build a cleaner measured model with matched
-   materials, a dollhouse view, first-person walking and a photo tour, and reports room
-   sizes and floor area.
+   `python3 _ai/make_walkthrough.py .`, which returns the raw scan as a walkthrough
+   immediately. Then it runs `python3 _ai/make_model.py .`, which builds the clean model:
+   the "architectural dollhouse" look (thick walls cut away toward the camera, framed doors
+   and windows, baseboards, floor textures cut from your photos, furniture in its measured
+   place and color, soft shadows and ambient occlusion, on a blueprint grid). The AI then
+   refines the model's `model.json` from the photos (real furniture types, rugs, plants,
+   decor, materials) and compares the model with each photo from that photo's exact camera
+   until they match. It also reports room sizes and floor area.
+
+What comes from where: walls, doors, windows, room sizes and furniture boxes are measured
+by RoomPlan. Colors and floor textures are sampled from the photos, and every sample is
+checked against the photo's LiDAR depth so nothing in front of a surface paints it. Furniture
+shapes and anything RoomPlan doesn't detect are modeled by the AI from the photos.
+
+To build the model yourself (numpy and Pillow give it colors):
+
+```sh
+pip3 install numpy pillow
+python3 ai-kit/make_model.py Scan.zip -o house-model     # → house-model/model.html
+# edit house-model/model.json, then rebuild:
+python3 ai-kit/make_model.py house-model
+```
 
 Chat upload limits vary, often a few hundred MB. A big house with many rooms can exceed
 them; in that case, export fewer rooms per scan.
@@ -131,7 +149,8 @@ python3 -m http.server 8000      # then http://localhost:8000/web/
   poses.csv                every photo + depth frame: x,y,z (m), direction, yaw/pitch, paired LiDAR frame, GPS
   depth/frames.json        LiDAR depth frames with poses
   depth/NNNNN.f16z|conf|jpg
-  _ai/                     make_walkthrough.py, viewer, scan-to-threejs skill + scripts
+  _ai/                     make_model.py + model/house.js, make_walkthrough.py + viewer,
+                           scan-to-threejs skill + scripts
 ```
 
 Coordinates are meters, +Y up, right-handed (ARKit world = three.js). Matrices are
@@ -155,21 +174,23 @@ TEST_RUNNER_FIXTURE_BUNDLE=$PWD/tests/out/FakeHouse TEST_RUNNER_AI_KIT=$PWD/ai-k
 derives edge cases from it: one room, no mesh, no depth, no photos, ASCII PLY, raw depth,
 and a zip with no folder. `tests/run.sh` runs:
 - the vendored scan-to-threejs scripts,
-- `make_walkthrough.py`,
-- the kit's unit tests (`tests/test_kit.py`),
+- `make_walkthrough.py` and `make_model.py`,
+- the kit's unit tests (`tests/test_kit.py`, `tests/test_model.py`: measured rooms, merged
+  walls, furniture placement, colors and floor textures sampled from the photos, rebuilds),
 - `tests/e2e.mjs`, which loads every variant in headless Chromium and drives the real UI,
-- `tests/compare_poses.py`, which renders the scan from every photo's camera and checks
-  pixel by pixel that it reproduces that photo.
+- `tests/compare_poses.py`, which renders the scan (and the clean model) from every photo's
+  camera and checks pixel by pixel that it reproduces that photo.
 
 CI (`.github/workflows/ci.yml`) also compiles the app, runs the Swift tests in the iOS
 Simulator, and opens the walkthrough built by the app's own Swift code in a browser.
 
-`ai-kit/walkthrough/three.bundle.min.js` is three.js r180 bundled into one ES module so the
-walkthrough works offline, including inside the single HTML file:
+`ai-kit/walkthrough/three.bundle.min.js` is three.js r180 plus the addons the model uses
+(OrbitControls, RoomEnvironment, RoundedBoxGeometry, the GTAO post-processing passes),
+bundled into one ES module so both viewers work offline, inside a single HTML file:
 
 ```sh
-npm i three@0.180.0 esbuild && echo "export * from 'three'" > entry.js && \
-  npx esbuild entry.js --bundle --minify --format=esm --outfile=ai-kit/walkthrough/three.bundle.min.js
+npm i three@0.180.0 esbuild && \
+  npx esbuild ai-kit/walkthrough/three-entry.js --bundle --minify --format=esm --outfile=ai-kit/walkthrough/three.bundle.min.js
 ```
 
 ## Credits

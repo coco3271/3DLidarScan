@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end check without an iPhone: synthesize a scan bundle (+ edge-case variants), run the
-# vendored scan-to-threejs scripts and make_walkthrough.py on them, then drive the walkthrough
+# vendored scan-to-threejs scripts, make_walkthrough.py and make_model.py on them, then drive the walkthrough
 # (single file + web app) in headless Chromium and verify the photo cameras pixel by pixel.
 # Needs python3 with numpy + Pillow, and node.
 set -euo pipefail
@@ -30,9 +30,18 @@ for v in single-room no-mesh no-depth no-photos ascii-ply raw-depth; do
 done
 python3 ai-kit/make_walkthrough.py "$OUT/variants/flat-zip.zip" -o "$OUT/variants/flat-zip.html" > /dev/null
 
+echo "== make_model.py"
+# the fake photos are small (480 px): allow coarser floor textures so that path is exercised
+python3 ai-kit/make_model.py "$OUT/FakeHouse.zip" -o "$OUT/model" --min-texture-res 60
+for v in single-room no-depth no-photos; do
+  python3 ai-kit/make_model.py "$OUT/variants/$v" -o "$OUT/variants/$v-model" > /dev/null
+done
+python3 tests/test_model.py "$OUT"
+
 echo "== browser"
 (cd tests && [ -d node_modules ] || npm install --silent)
 node tests/e2e.mjs "$OUT"
 echo "== photo cameras vs photos"
 python3 tests/compare_poses.py "$OUT" "$OUT/FakeHouse"
+python3 tests/compare_poses.py "$OUT" "$OUT/FakeHouse" model-
 echo "OK — screenshots in $OUT"

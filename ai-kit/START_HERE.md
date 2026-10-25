@@ -6,10 +6,16 @@ GPS). It uses the `house-capture/5` bundle format of
 `scan-to-threejs` workflow applies. A copy of the skill and its scripts is in
 `_ai/scan-to-threejs/` (MIT, see its LICENSE).
 
-**Goal:** give the user an interactive 3D walkthrough of the property that they can open in a
-browser. It needs a dollhouse overview, first-person walking between rooms, and a tour of
-the photo spots. Be accurate to the measurements, and be honest about what is measured and
-what is guessed.
+**Goal:** give the user a clean, measured 3D model of the property that they can open in a
+browser: the "architectural dollhouse" look (thick cut-away walls, framed doors and windows,
+real floor materials, furniture in its place, soft shadows, on a dark blueprint grid), with
+first-person walking between rooms and a tour of the photo spots. Be accurate to the
+measurements, and be honest about what is measured and what is guessed.
+
+Don't hand over the raw LiDAR mesh as the result: it is noisy and lumpy. Don't model the
+house from scratch either: boxy guessed furniture under flat light looks like a toy. The kit
+already has a renderer for the clean look (step 3). Your job is to describe the house
+accurately in its `model.json`.
 
 ## 1. Unpack and orient yourself
 
@@ -62,14 +68,89 @@ This uses only the standard library, and Pillow is optional. It writes one self-
 offline HTML file. That file shows the LiDAR mesh colored from the photos (with occlusion
 tests against the depth frames), Apple's RoomPlan walls, doors, windows and furniture, the
 photo spots, and Dollhouse, Walk (WASD or an on-screen joystick) and Photo tour modes.
-**Always give the user this file first.** It works on phones and desktops, needs no server
-and has no dependencies. If the zip already has `walkthrough.html` from the phone, you can
+Give the user this file first, as the quick result while you build the clean model in
+step 3. It works on phones and desktops, needs no server and has no dependencies. If the zip already has `walkthrough.html` from the phone, you can
 hand that over as-is, or regenerate it.
 
-## 3. Full rebuild: a clean, editable three.js model (scan-to-threejs workflow)
+## 3. The clean model: `make_model.py`, then refine `model.json`
 
-When the user wants a polished model and not the raw scan, follow
-`_ai/scan-to-threejs/SKILL.md` and `references/house-capture.md`. In short:
+```sh
+python3 _ai/make_model.py . -o house-model    # inside the bundle folder (or pass the .zip); needs numpy + Pillow for colors
+```
+
+It writes `house-model/` with:
+
+- `model.json`: the whole house as data: rooms (floor polygons), walls (with door, window and
+  opening cut-outs), furniture, materials, and the photo cameras. Units are meters, +Y up,
+  the floor at y = 0, and the walls run along X/Z.
+- `textures/floor-N.jpg`: a square of each room's real floor, cut out of the sharpest photo
+  that shows it with nothing in the way, and flattened so it tiles.
+- `photos/`: the tour photos, for the compare view.
+- `model.html`: one offline file to give the user. It has a dollhouse view where the walls
+  between the camera and the rooms are cut away, Walk (drag + WASD), and Photos (the exact
+  camera of each photo, with a Compare slider that blends the photo over the model).
+
+It does this from the measurements alone. Walls, openings and furniture boxes are from
+RoomPlan. The two faces of a wall shared by two rooms become one wall, as thick as the gap
+between them, and corners are joined. Wall paint, floor colors and furniture colors are
+sampled from the photos. Every color sample is checked against that photo's LiDAR depth, so
+a sofa standing in front of a wall never paints the wall.
+
+**Then make it look like the photos.** Look at the photos (`photos/` in the model folder,
+and `photos/*.jpg` in the bundle; rotate them upright). Edit `model.json` and rebuild with
+`python3 _ai/make_model.py house-model`, which keeps your edits. Things to fix, roughly in
+order of how much they matter:
+
+1. **Furniture types and shapes.** RoomPlan only says `storage`, `table`, `chair` and
+   similar. Change each item's `type` to what it really is, keeping its measured `center`,
+   `size` and `rotY` (its front faces +z). Built-in types are: `bed sofa chair table desk
+   storage shelf television refrigerator stove oven dishwasher washerDryer sink toilet
+   bathtub fireplace stairs rug plant lamp curtain wallArt box custom`. Set `color` (and
+   `colors: {blanket, pillow, wood, legs, front, counter, pot, frame, railing}` where it
+   applies) from the photos.
+2. **What RoomPlan doesn't detect**, from the photos: rugs, plants, lamps, curtains, wall art,
+   shelves of books, counters, a kitchen island. Add items for them, with sizes estimated
+   against the measured walls and furniture.
+3. **Anything unusual:** build it as `type: "custom"` with `parts`, a list of
+   `{shape: box|rbox|cyl|sphere|cone, size: [w,h,d], pos: [x,y,z], rot: [rx,ry,rz], color, roughness, metalness}`
+   in the item's own frame (y = 0 is the floor, front is +z).
+4. **Materials.** `materials` maps names to `{color, map, tile, roughness}`. A room's `floor`
+   names one, or is a `"#hex"`. If a generated floor swatch looks wrong (a rug, a shadow),
+   replace the texture or set a plain color. `style.wallColor` is the house paint; set `color`
+   on a single wall for an accent wall or tiles.
+5. **Geometry** only where the scan is clearly wrong: a missed door (add an opening with `u0,u1`
+   along the wall from `a` and `v0,v1` above the floor), a door that should be shown open
+   (`open: true`), or a wall RoomPlan missed.
+
+**Check against the photos, and iterate.** `model.html#photo=N&ui=0` renders the model from
+photo N's exact camera, with the same position, orientation and field of view. Use a 3:4
+window, which matches the upright photo. `&overlay=0.5` blends the photo on top, and
+`&quality=0` turns off ambient occlusion for faster headless renders. With a headless browser
+(Playwright), screenshot each photo's view next to the photo. Fix the biggest mismatch, rebuild,
+and repeat. Keep going past "close enough": shapes, colors, and the small objects that make a
+room look lived in.
+
+`model.json` reference (everything is optional except the geometry):
+
+```js
+{ name, subtitle,
+  style:  { background, grid, wallColor, wallThickness, baseboard },
+  rooms:  [{ name, polygon: [[x,z]...], floor: "<material>"|"#hex", height?, label? }],
+  walls:  [{ a:[x,z], b:[x,z], height, thickness?, color?, centered?,
+             openings: [{ kind: "door"|"window"|"opening", u0, u1, v0, v1, open? }] }],
+  items:  [{ type, center:[x,y,z], size:[w,h,d], rotY, color?, colors?, parts?, label? }],
+  materials: { name: { color?, map?: "textures/x.jpg", tile?: meters, roughness? } },
+  photos: [{ file, transform (column-major 4x4, model frame), width, height, fx }] }
+```
+
+`a → b` is the wall's interior face, with the room to its left seen from above (`n` points
+into the room). A `centered` wall straddles `a → b`, between two rooms. `source.worldToModel`
+converts ARKit world coordinates (meshes, depth frames, `poses.csv`) into the model frame.
+
+## 4. Going further: your own three.js build (scan-to-threejs workflow)
+
+Only for something `model.json` can't express. Follow
+`_ai/scan-to-threejs/SKILL.md` and `references/house-capture.md`:
 
 ```sh
 S=_ai/scan-to-threejs/scripts
@@ -80,36 +161,17 @@ python3 $S/prepare_photos.py . house.json photos-upright      # upright photos i
 python3 $S/reconstruct_bundle.py . --room house.json -o recon
 ```
 
-`bundle_to_room.py` writes measured room coordinates: the floor at y=0, walls aligned to X/Z,
-inward normals, openings in wall u/v, furniture boxes (`center`, `size`, `rotY`), and photo
-cameras (`position`, `forward`, `up`, `fovY`). Then:
+Measure first, model the furniture from the RoomPlan boxes and the photos, then render from
+each photo's camera and iterate, as above. You can reuse the renderer:
+`_ai/model/house.js` exports `startModel(THREE, element, source)`, and
+`_ai/walkthrough/viewer.js` exports `startWalkthrough(THREE, element, source)`. Deliver a
+single self-contained HTML file.
 
-1. **Measure first.** Build the floor polygon, walls (with their real heights), door and
-   window cut-outs, and ceilings from those numbers. Don't invent dimensions. Where
-   something is uncertain, say so.
-2. **Model the furniture** from the RoomPlan boxes (treat them as bounds, not shapes) and
-   from the photos (shape, material, color). Look at the photos. Make materials and colors
-   match what's visible: floors, wall paint, cabinets, counters, fixtures.
-3. **Compare with the photos, and iterate.** Render the model from each tour photo's camera
-   pose (position, forward, up, fovY) and put it next to the photo. Fix the biggest mismatch,
-   then repeat until they agree. Keep going past "close enough": shapes, materials,
-   textures, small objects. The baseline walkthrough already does this framing:
-   `walkthrough.html#photo=N&ui=0&layers=mesh` shows the LiDAR scan from photo N's exact
-   camera, with the same position, orientation and field of view, no UI, and a 3:4 window
-   matches the upright photo. `&overlay=0.5` blends the photo on top. With a headless
-   browser (Playwright, agent-browser) that gives you photo-vs-scan pairs to measure
-   against. Use the same pose math for your own model.
+## 5. What to tell the user
 
-4. **Deliver** a single self-contained HTML file. Inline three.js (or use one pinned CDN URL).
-   Include dollhouse and first-person controls with touch support, clickable photo spots
-   that fly the camera to the photo pose and show the photo, and room labels from
-   `manifest.rooms[].name`. Also give the property name and address from `manifest.property`.
-   You can reuse `_ai/walkthrough/viewer.js`: it exports `startWalkthrough(THREE, element, source)`.
-
-## 4. What to tell the user
-
-- Which file to open, and the controls: drag to look, WASD or the joystick to walk, and
-  tap a pink dot for a photo stop.
+- Which file to open (`model.html` from step 3, plus `walkthrough.html` from step 2 if they
+  want the raw scan), and the controls: drag to orbit or look, WASD to walk, and Photos to
+  step through the photo spots.
 - What is measured (RoomPlan walls, openings, room sizes; LiDAR mesh) and what is modeled
   or approximate (furniture detail, materials, areas the scan didn't see).
 - Room sizes and the total floor area from the measurements, if they'd find that useful.

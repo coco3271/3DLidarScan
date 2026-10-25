@@ -5,7 +5,7 @@ like any other photo. This catches wrong axes, a missing upright rotation, a wro
 view or a mirrored image, any of which would make "render from where the photo was taken"
 useless for the scan-to-threejs comparison loop.
 
-usage: compare_poses.py <out-dir> <bundle-dir>
+usage: compare_poses.py <out-dir> <bundle-dir> [prefix]   (prefix model- checks make_model.py's renders)
 """
 import json
 import os
@@ -23,21 +23,29 @@ def upright(path, size):
 
 def main():
     out, bundle = sys.argv[1], sys.argv[2]
-    files = json.load(open(os.path.join(out, 'pose-index.json')))
-    renders = [np.asarray(Image.open(os.path.join(out, f'pose-{i}.png')).convert('RGB'), dtype=np.float32) for i in range(len(files))]
+    prefix = sys.argv[3] if len(sys.argv) > 3 else ''
+    files = json.load(open(os.path.join(out, f'{prefix}pose-index.json')))
+    renders = [np.asarray(Image.open(os.path.join(out, f'{prefix}pose-{i}.png')).convert('RGB'), dtype=np.float32) for i in range(len(files))]
     h, w = renders[0].shape[:2]
     photos = [upright(os.path.join(bundle, f), (w, h)) for f in files]
     # ignore pixels the scan never colored (class-grey: r≈g≈b) and the background
+    colorful = lambda a: (np.abs(a[..., 0] - a[..., 1]) + np.abs(a[..., 1] - a[..., 2])) > 12
+    # the clean model has one flat color per surface, not the photos' lighting: compare hue only
+    # (chromaticity), and allow ties between photos of the same plain wall
+    model = prefix.startswith('model')
+    chroma = lambda a: a / np.maximum(a.sum(-1, keepdims=True), 1) * 255
     diff = np.zeros((len(files), len(files)))
     for i, r in enumerate(renders):
-        mask = (np.abs(r[..., 0] - r[..., 1]) + np.abs(r[..., 1] - r[..., 2])) > 12
+        mask = colorful(r)
         for j, p in enumerate(photos):
-            diff[i, j] = np.abs(r - p)[mask].mean() if mask.any() else 255
+            m = mask & colorful(p) if model else mask
+            d = np.abs(chroma(r) - chroma(p)) if model else np.abs(r - p)
+            diff[i, j] = d[m].mean() if m.any() else 255
     failed = 0
     for i in range(len(files)):
         own = diff[i, i]
         others = np.delete(diff[i], i)
-        ok = own < 30 and own < 0.6 * others.min()
+        ok = own < 15 and own <= others.min() + 1 if model else own < 30 and own < 0.6 * others.min()
         failed += not ok
         print(f"  {'ok ' if ok else 'FAIL'} {files[i]}: mean |render − photo| = {own:5.1f}  (closest other photo {others.min():5.1f})")
     if failed:
