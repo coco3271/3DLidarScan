@@ -507,9 +507,9 @@ final class CaptureController: NSObject, ObservableObject {
 /// RoomCaptureSession's delegate, kept apart from the main-actor controller. RoomPlan doesn't
 /// promise which thread it calls from, so everything hops to the main actor.
 final class RoomSessionDelegate: NSObject, RoomCaptureSessionDelegate, @unchecked Sendable {
-  @MainActor var onUpdate: ((CapturedRoom) -> Void)?
-  @MainActor var onInstruction: ((String?) -> Void)?
-  @MainActor var onEnd: ((CapturedRoomData, Error?) -> Void)?
+  @MainActor var onUpdate: (@MainActor (CapturedRoom) -> Void)?
+  @MainActor var onInstruction: (@MainActor (String?) -> Void)?
+  @MainActor var onEnd: (@MainActor (CapturedRoomData, Error?) -> Void)?
 
   func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
     Task { @MainActor in self.onUpdate?(room) }

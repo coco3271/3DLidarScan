@@ -31,7 +31,7 @@ final class CoverageMap: @unchecked Sendable {
   static let boundaryMargin: Float = 0.3
 
   /// Pack a world position's voxel index into 64 bits (21 bits per axis: ±52 km at 5 cm)
-  static func key(_ p: SIMD3<Float>) -> Int64 { key(cell(p)) }
+  static func key(_ p: SIMD3<Float>) -> Int64 { packed(cell(p)) }
 
   private static func cell(_ p: SIMD3<Float>) -> SIMD3<Float> {
     // clamp first: Int64(nan or ±inf) would trap
@@ -40,7 +40,8 @@ final class CoverageMap: @unchecked Sendable {
       .clamped(lowerBound: SIMD3(repeating: -1e6), upperBound: SIMD3(repeating: 1e6))
   }
 
-  private static func key(_ c: SIMD3<Float>) -> Int64 {
+  /// voxel indices (whole numbers as floats) → one 64-bit key
+  private static func packed(_ c: SIMD3<Float>) -> Int64 {
     let mask: Int64 = 0x1F_FFFF
     return (Int64(c.x) & mask) | ((Int64(c.y) & mask) << 21) | ((Int64(c.z) & mask) << 42)
   }
@@ -58,7 +59,7 @@ final class CoverageMap: @unchecked Sendable {
       else { options.append([c[a]]) }
     }
     var out: [Int64] = []
-    for x in options[0] { for y in options[1] { for z in options[2] { out.append(key(SIMD3(x, y, z))) } } }
+    for x in options[0] { for y in options[1] { for z in options[2] { out.append(packed(SIMD3(x, y, z))) } } }
     return out
   }
 
