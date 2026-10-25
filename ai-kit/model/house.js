@@ -406,7 +406,10 @@ export async function startModel(THREE, container, source) {
     for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, up)
   }
 
+  let dollhouseView = null // where the orbit camera was, to come back to it from Walk/Photos
   function setMode(m) {
+    const prev = mode
+    if (prev === 'dollhouse' && m !== 'dollhouse') dollhouseView = camera.position.clone()
     mode = m
     ui.move.hidden = m !== 'walk'
     ui.photoPanel.hidden = m !== 'photo'
@@ -418,7 +421,10 @@ export async function startModel(THREE, container, source) {
       if (photoIndex < 0 && exact == null) walk.pos.copy(start)
       walk.yaw = Math.atan2(-d.x, -d.z); walk.pitch = 0
     }
-    if (m === 'dollhouse') camera.fov = 40, camera.updateProjectionMatrix()
+    if (m === 'dollhouse') {
+      camera.fov = 40; camera.updateProjectionMatrix()
+      if (prev !== 'dollhouse') { if (dollhouseView) camera.position.copy(dollhouseView); else frameHouse(); orbit.update() }
+    }
     updateCutaway()
     if (m === 'photo' && photos.length && !exact) goToPhoto(Math.max(0, photoIndex))
   }

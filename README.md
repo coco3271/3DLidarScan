@@ -114,6 +114,10 @@ by RoomPlan. Colors and floor textures are sampled from the photos, and every sa
 checked against the photo's LiDAR depth so nothing in front of a surface paints it. Furniture
 shapes and anything RoomPlan doesn't detect are modeled by the AI from the photos.
 
+**With Claude Code on your Mac:** start Claude Code, give it [`BUILD_3D_MODEL.md`](BUILD_3D_MODEL.md)
+and the path to your scan zip. It sets up the tools, builds the model, and refines it
+against your photos until they match.
+
 To build the model yourself (numpy and Pillow give it colors):
 
 ```sh

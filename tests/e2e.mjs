@@ -267,6 +267,8 @@ console.log('clean model (make_model.py)')
   await page.locator('.hm-photo .ov').fill('50')
   check(await page.evaluate(() => { const o = document.querySelector('.hm-overlay'); return !o.hidden && +o.style.opacity === 0.5 }), 'model: compare overlay')
   await page.screenshot({ path: path.join(out, 'model-photo.png') })
+  await page.click('.hm-modes button[data-mode=dollhouse]'); await page.waitForTimeout(300)
+  check(await page.evaluate(() => window.walkthrough.camera.position.y > 4), 'model: back to Dollhouse restores the overview camera')
   check(errors.length === 0, `model: no errors after interaction (${errors.join(' | ')})`)
   await page.close()
 
