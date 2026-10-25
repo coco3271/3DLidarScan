@@ -39,6 +39,8 @@ final class CaptureController: NSObject, ObservableObject {
   @Published private(set) var coverageStalled = false
   /// auto photos + depth recording paused (RoomPlan keeps tracking)
   @Published private(set) var paused = false
+  /// LiDAR mesh pieces on screen (0 = ARKit hasn't produced a mesh yet)
+  @Published private(set) var meshAnchors = 0
   @Published var meshVisible = true {
     didSet { overlay.meshVisible = meshVisible }
   }
@@ -71,7 +73,6 @@ final class CaptureController: NSObject, ObservableObject {
   private var lastDepth: (time: TimeInterval, pose: simd_float4x4)?
   private var previousPose: (time: TimeInterval, pose: simd_float4x4)?
   private var lastConfigCheck: TimeInterval = 0
-  private var configRuns = 0
   private var highResInFlight = false
   /// the device/RoomPlan configuration refused a full-resolution still: stop asking for auto photos
   private var highResSupported = true
@@ -83,7 +84,8 @@ final class CaptureController: NSObject, ObservableObject {
   /// long edge of automatic photos: full-resolution stills scaled to 3024, video frames stay 1920×1440
   private static let maxAutoEdge: CGFloat = 3024
   /// predicted motion smear (pixels at 1920 wide) above which an automatic photo is skipped
-  private static let maxAutoBlur: Float = 2.5
+  /// (indoor exposures are ~1/60 s, so a hand-held walk is ~2–4 px; 2.5 rejected most photos)
+  private static let maxAutoBlur: Float = 4
 
   init(folder: URL, propertyName: String) {
     self.folder = folder
@@ -105,6 +107,7 @@ final class CaptureController: NSObject, ObservableObject {
       Task { await self.roomEnded(data, error: error) }
     }
     overlay.onCoverage = { [weak self] fraction in self?.coverageChanged(fraction) }
+    overlay.onMeshAnchors = { [weak self] count in self?.meshAnchors = count }
   }
 
   static var isSupported: Bool { RoomCaptureSession.isSupported }
@@ -116,7 +119,6 @@ final class CaptureController: NSObject, ObservableObject {
     warning = nil
     if roomName.trimmingCharacters(in: .whitespaces).isEmpty { roomName = "Room \(roomIndex + 1)" }
     location.start()
-    configRuns = 0
     lastAutoPhoto = nil
     previousPose = nil
     roomMeshRecord = nil
@@ -330,24 +332,24 @@ final class CaptureController: NSObject, ObservableObject {
   }
 
   /// RoomPlan's own ARConfiguration doesn't hand out mesh anchors or depth. Adding them to
-  /// *its* configuration (no reset, same world) keeps RoomPlan working; check now and then
-  /// because RoomPlan may reconfigure. Capped so a device that refuses can't loop forever.
+  /// *its* configuration (no reset, same world) keeps RoomPlan working, but RoomPlan switches
+  /// back to its own configuration again and again while it scans, so this has to keep
+  /// re-applying them (every half second) for as long as the room is being scanned. (An earlier
+  /// version gave up after 6 tries: no live mesh, and no coverage, until the room was saved.)
   private func ensureMeshAndDepth(now: TimeInterval) {
-    guard now - lastConfigCheck > 1, configRuns < 6,
+    guard now - lastConfigCheck > 0.5,
           let c = arSession.configuration as? ARWorldTrackingConfiguration else { return }
     lastConfigCheck = now
     let wantsDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
-    let meshOK = c.sceneReconstruction.contains(.meshWithClassification)
+    let wantsMesh = ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
+    let meshOK = !wantsMesh || c.sceneReconstruction.contains(.meshWithClassification)
     let depthOK = !wantsDepth || c.frameSemantics.contains(.sceneDepth)
     if meshOK && depthOK { return }
     guard let updated = c.copy() as? ARWorldTrackingConfiguration else { return }
     updated.initialWorldMap = nil
-    if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
-      updated.sceneReconstruction = .meshWithClassification
-    }
+    if wantsMesh { updated.sceneReconstruction = .meshWithClassification }
     if wantsDepth { updated.frameSemantics.insert(.sceneDepth) }
-    configRuns += 1
-    arSession.run(updated, options: [])
+    arSession.run(updated, options: []) // no reset: same world, RoomPlan keeps going
   }
 
   /// Depth while walking: up to 5/s, only when the phone moved or turned a little

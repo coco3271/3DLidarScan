@@ -88,6 +88,10 @@ struct CaptureScreen: View {
   @ViewBuilder private var hints: some View {
     if controller.phase == .scanning {
       VStack(spacing: 6) {
+        if controller.meshAnchors == 0 {
+          hint("Waiting for the LiDAR mesh… move the phone slowly around the room.",
+               systemImage: "hourglass", tint: .white)
+        }
         if let instruction = controller.instruction {
           hint(instruction, systemImage: "exclamationmark.triangle.fill", tint: .yellow)
         }
@@ -133,7 +137,7 @@ struct CaptureScreen: View {
     case .ready:
       Button("Start scanning") { askRoomName = true }.buttonStyle(.borderedProminent).controlSize(.large)
     case .scanning:
-      HStack(spacing: 14) {
+      HStack(spacing: 10) {
         Button { controller.togglePause() } label: {
           Image(systemName: controller.paused ? "play.fill" : "pause.fill").font(.title3).frame(width: 46, height: 46)
             .background(.ultraThinMaterial, in: Circle())
@@ -154,8 +158,11 @@ struct CaptureScreen: View {
         }
         .accessibilityLabel("Take a full-resolution photo (tour stop)")
         Spacer()
-        Button("Save room") { controller.finishRoom() }
-          .buttonStyle(.borderedProminent).tint(.blue).controlSize(.large)
+        Button { controller.finishRoom() } label: {
+          Text("Save room").lineLimit(1).fixedSize()
+        }
+        .buttonStyle(.borderedProminent).tint(.blue).controlSize(.large)
+        .layoutPriority(1)
       }
       .padding(10)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
@@ -164,7 +171,8 @@ struct CaptureScreen: View {
     case .roomDone:
       VStack(spacing: 10) {
         Text("“\(controller.roomName)” saved · \(controller.coveragePercent)% photo detail").font(.headline)
-        Text("Walk to the next room without closing the app so all rooms line up.").font(.caption).multilineTextAlignment(.center)
+        Text("Photos have stopped for this room, so the colors no longer change. Walk to the next room without closing the app so all rooms line up.")
+          .font(.caption).multilineTextAlignment(.center)
         HStack {
           Button("Scan next room") {
             controller.prepareNextRoom()

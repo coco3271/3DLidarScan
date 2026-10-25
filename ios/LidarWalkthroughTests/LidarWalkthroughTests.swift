@@ -249,7 +249,8 @@ final class LidarWalkthroughTests: XCTestCase {
 
   func testWeightFavorsCloseUpViews() {
     XCTAssertEqual(CoverageMap.weight(distance: 0.8), 1)
-    XCTAssertEqual(CoverageMap.weight(distance: 2.35), 0.5, accuracy: 1e-5)
+    XCTAssertEqual(CoverageMap.weight(distance: 1.5), 1)
+    XCTAssertEqual(CoverageMap.weight(distance: 2.75), 0.5, accuracy: 1e-5)
     XCTAssertEqual(CoverageMap.weight(distance: 4), 0)
     XCTAssertEqual(CoverageMap.band(0), 0)
     XCTAssertEqual(CoverageMap.band(0.5), 1)
@@ -316,8 +317,8 @@ final class LidarWalkthroughTests: XCTestCase {
   }
 
   /// The synthetic scan's photos, through their own LiDAR depth frames, must turn a good part
-  /// of its mesh green/amber: same numbers as an independent Python implementation (47 % seen,
-  /// 16 % captured with only 14 photos)
+  /// of its mesh green/amber: same numbers as an independent Python implementation (54 % seen,
+  /// 22 % captured with only 14 photos)
   func testFixtureCoverageFromPhotoDepth() throws {
     let dir = try fixture()
     let photos = try BundleJSON.decoder.decode([PhotoRecord].self, from: Data(contentsOf: dir.appendingPathComponent("photos/photos.json")))
@@ -350,7 +351,7 @@ final class LidarWalkthroughTests: XCTestCase {
     let scores = map.scores(for: vertices)
     let seen = Float(scores.filter { $0 > 0.05 }.count) / Float(count)
     let captured = Float(scores.filter { $0 >= CoverageMap.goodScore }.count) / Float(count)
-    XCTAssertEqual(seen, 0.47, accuracy: 0.05)
-    XCTAssertEqual(captured, 0.16, accuracy: 0.05)
+    XCTAssertEqual(seen, 0.54, accuracy: 0.05)
+    XCTAssertEqual(captured, 0.22, accuracy: 0.05)
   }
 }

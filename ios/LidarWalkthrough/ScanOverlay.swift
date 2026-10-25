@@ -17,6 +17,8 @@ final class ScanOverlay: NSObject {
   let coverage: CoverageMap
   /// fraction of the LiDAR mesh that is well photographed, 0…1 (main thread)
   var onCoverage: (@MainActor (Float) -> Void)?
+  /// how many LiDAR mesh anchors are drawn (main thread)
+  var onMeshAnchors: (@MainActor (Int) -> Void)?
 
   var meshVisible = true {
     didSet { for node in state.allNodes() { node.isHidden = !meshVisible } }
@@ -111,10 +113,12 @@ final class ScanOverlay: NSObject {
       built.append((mesh.id, Self.geometry(mesh, result)))
     }
     let fraction = state.capturedFraction()
+    let anchorCount = state.allSnapshots().count
     Task { @MainActor [weak self] in
       guard let self else { return }
       for (id, geometry) in built { self.state.apply(geometry, to: id, hidden: !self.meshVisible) }
       self.onCoverage?(fraction)
+      self.onMeshAnchors?(anchorCount)
     }
   }
 

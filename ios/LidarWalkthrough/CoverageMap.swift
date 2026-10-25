@@ -63,12 +63,13 @@ final class CoverageMap: @unchecked Sendable {
     return out
   }
 
-  /// How much one view of a surface `distance` meters away is worth: full credit up close,
-  /// fading out by 3.5 m (too far to resolve detail)
+  /// How much one view of a surface `distance` meters away is worth: full credit within
+  /// 1.5 m (detail is sharp), fading out by 4 m (too far to resolve detail). Most of a room is
+  /// photographed from 1.5–3 m, where two or three views add up to "captured".
   static func weight(distance d: Float) -> Float {
-    if d <= 1.2 { return 1 }
-    if d >= 3.5 { return 0 }
-    return 1 - (d - 1.2) / 2.3
+    if d <= 1.5 { return 1 }
+    if d >= 4 { return 0 }
+    return 1 - (d - 1.5) / 2.5
   }
 
   /// red (0), amber (1) or green (2) for a coverage score
