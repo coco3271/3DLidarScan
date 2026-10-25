@@ -22,7 +22,7 @@ spaces, so quote paths.
 | `structure.json` | All rooms merged by Apple's RoomPlan `StructureBuilder`, present when 2 or more rooms were scanned |
 | `rooms/room-N.json` | One room as RoomPlan's `CapturedRoom` JSON: `walls`, `doors`, `windows`, `openings`, `objects`, `floors` |
 | `rooms/room-N.usdz` | Apple's parametric model of the room |
-| `mesh/room-N.ply` | LiDAR triangle mesh (the last room's file has the whole session). Faces carry the ARKit class: 0 none, 1 wall, 2 floor, 3 ceiling, 4 table, 5 seat, 6 window, 7 door |
+| `mesh/room-N.ply` | LiDAR triangle mesh (the last room's file has the whole session). Faces carry the ARKit class: 0 none, 1 wall, 2 floor, 3 ceiling, 4 table, 5 seat, 6 window, 7 door. The per-vertex `coverage` value says how well the photos show that spot: 0 means no photo saw it (so model it from the mesh and RoomPlan alone), and 1 or more means well photographed. The red/amber/green vertex colors show the same thing. |
 | `photos/photos.json` + `photos/NNNN.jpg` | Posed photos. `manual: true` marks the high-resolution shots the user took at each spot (the tour stops). Each has `location` (lat/lon, accuracy in m, compass `heading`) |
 | `depth/frames.json` + `depth/NNNNN.{f16z,conf,jpg}` | LiDAR depth frames: 256×192 Float16 meters stored as raw DEFLATE (`zlib.decompress(raw, -15)`), confidence 0–2, and 640×480 RGB, each with its pose |
 | `walkthrough.html` | A ready-made walkthrough built on the phone (see step 2) |

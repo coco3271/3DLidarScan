@@ -4,9 +4,10 @@ import RoomPlan
 import SwiftUI
 import UIKit
 
-/// Runs one property capture: Apple's RoomPlan (RoomCaptureView) builds the parametric room
-/// model while, on the same ARSession, we record the LiDAR mesh, depth frames, automatic
-/// reference photos and full-resolution shutter photos, each tagged with GPS + compass.
+/// Runs one property capture: Apple's RoomPlan (a headless RoomCaptureSession) builds the
+/// parametric room model while, on the same ARSession, we record the LiDAR mesh, depth frames,
+/// automatic reference photos and full-resolution shutter photos, each tagged with GPS +
+/// compass. ScanOverlay draws the live mesh, colored by how well the photos cover it.
 /// Several rooms in a row share one ARKit world, so StructureBuilder can merge them into a
 /// floor plan and every pose in the bundle lines up.
 @MainActor
@@ -30,14 +31,31 @@ final class CaptureController: NSObject, ObservableObject {
   @Published private(set) var trail: [SIMD2<Float>] = []
   @Published private(set) var here: MapSpot?
   @Published private(set) var photoSpots: [MapSpot] = []
+  /// share of the LiDAR mesh that is well photographed (the "Photo detail" ring), 0…100
+  @Published private(set) var coveragePercent = 0
+  /// RoomPlan's coaching ("Move closer to the wall", …), nil when all is well
+  @Published private(set) var instruction: String?
+  /// coverage stopped improving: tell the user they can save
+  @Published private(set) var coverageStalled = false
+  /// auto photos + depth recording paused (RoomPlan keeps tracking)
+  @Published private(set) var paused = false
+  @Published var meshVisible = true {
+    didSet { overlay.meshVisible = meshVisible }
+  }
 
   let arSession = ARSession()
-  private let roomDelegate = RoomViewDelegate()
-  private(set) lazy var roomCaptureView: RoomCaptureView = {
-    let view = RoomCaptureView(frame: .zero, arSession: arSession)
-    view.delegate = roomDelegate
-    return view
+  /// what the photos have captured, shared with the overlay that colors the mesh
+  let coverage = CoverageMap()
+  /// camera + LiDAR mesh tinted red/green by photo coverage + RoomPlan outlines
+  private(set) lazy var overlay = ScanOverlay(session: arSession, coverage: coverage)
+  /// RoomPlan runs headless on our ARSession; the overlay draws what it finds
+  private let roomDelegate = RoomSessionDelegate()
+  private lazy var roomSession: RoomCaptureSession = {
+    let session = RoomCaptureSession(arSession: arSession)
+    session.delegate = roomDelegate
+    return session
   }()
+  private var coverageHistory: [(time: TimeInterval, percent: Int)] = []
   let location = LocationTracker()
 
   let folder: URL
@@ -80,15 +98,13 @@ final class CaptureController: NSObject, ObservableObject {
     locationSink = location.objectWillChange.sink { [weak self] _ in
       DispatchQueue.main.async { self?.objectWillChange.send() }
     }
-    roomDelegate.onRoomData = { [weak self] data in
-      MainActor.assumeIsolated { self?.saveRoomData(data) }
+    roomDelegate.onUpdate = { [weak self] room in self?.overlay.showRoom(room) }
+    roomDelegate.onInstruction = { [weak self] text in self?.instruction = text }
+    roomDelegate.onEnd = { [weak self] data, error in
+      guard let self else { return }
+      Task { await self.roomEnded(data, error: error) }
     }
-    roomDelegate.onRoom = { [weak self] room, error in
-      MainActor.assumeIsolated {
-        guard let self else { return }
-        Task { await self.roomProcessed(room, error: error) }
-      }
-    }
+    overlay.onCoverage = { [weak self] fraction in self?.coverageChanged(fraction) }
   }
 
   static var isSupported: Bool { RoomCaptureSession.isSupported }
@@ -104,7 +120,11 @@ final class CaptureController: NSObject, ObservableObject {
     lastAutoPhoto = nil
     previousPose = nil
     roomMeshRecord = nil
-    roomCaptureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
+    instruction = nil
+    coverageStalled = false
+    coverageHistory = []
+    if paused { paused = false }
+    roomSession.run(configuration: RoomCaptureSession.Configuration())
     phase = .scanning
     UIApplication.shared.isIdleTimerDisabled = true
     ticker?.invalidate()
@@ -121,7 +141,7 @@ final class CaptureController: NSObject, ObservableObject {
     ticker?.invalidate()
     Task {
       await self.exportMesh()
-      self.roomCaptureView.captureSession.stop(pauseARSession: false)
+      self.roomSession.stop(pauseARSession: false)
     }
   }
 
@@ -130,8 +150,9 @@ final class CaptureController: NSObject, ObservableObject {
     let anchors = arSession.currentFrame?.anchors.compactMap { $0 as? ARMeshAnchor } ?? []
     let index = roomIndex
     let url = folder.appendingPathComponent("mesh/room-\(index).ply")
+    let coverage = coverage
     let record = await Task.detached(priority: .userInitiated) { () -> MeshRecord? in
-      guard !anchors.isEmpty, var r = try? MeshExporter.writePLY(anchors: anchors, to: url) else { return nil }
+      guard !anchors.isEmpty, var r = try? MeshExporter.writePLY(anchors: anchors, to: url, coverage: coverage) else { return nil }
       r.file = "mesh/room-\(index).ply"
       return r
     }.value
@@ -139,13 +160,60 @@ final class CaptureController: NSObject, ObservableObject {
     meshFaces = record?.faces ?? 0
   }
 
-  /// RoomPlan's raw capture data, so RoomBuilder can be re-run on it later
-  private func saveRoomData(_ data: CapturedRoomData) {
-    guard let json = try? JSONEncoder().encode(data) else { return }
-    try? json.write(to: folder.appendingPathComponent("rooms/room-\(roomIndex)-data.json"))
+  /// RoomPlan finished capturing (we stopped it, or it stopped on its own): keep its raw data,
+  /// then build the final room model from it
+  private func roomEnded(_ data: CapturedRoomData, error: Error?) async {
+    guard phase == .processingRoom || phase == .scanning else { return }
+    if let json = try? JSONEncoder().encode(data) {
+      try? json.write(to: folder.appendingPathComponent("rooms/room-\(roomIndex)-data.json"))
+    }
+    do {
+      let room = try await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: data)
+      await roomProcessed(room, error: error)
+    } catch {
+      await roomFailed(error)
+    }
+  }
+
+  /// RoomPlan couldn't build a model: keep the room's mesh, photos and depth anyway
+  private func roomFailed(_ error: Error) async {
+    if phase == .scanning {
+      phase = .processingRoom
+      await exportMesh()
+    }
+    ticker?.invalidate()
+    warning = "RoomPlan couldn't model this room (\(error.localizedDescription)). The LiDAR mesh and photos are saved."
+    let index = roomIndex
+    manifest.rooms.append(RoomRecord(
+      index: index, name: roomName.trimmingCharacters(in: .whitespaces), file: "", usdz: "", capturedAt: Date(),
+      walls: 0, doors: 0, windows: 0, openings: 0, objects: 0, mesh: roomMeshRecord, data: nil))
+    if let roomMeshRecord { manifest.mesh = roomMeshRecord }
+    await saveIndexes()
+    phase = .roomDone
+  }
+
+  // MARK: coverage
+
+  private func coverageChanged(_ fraction: Float) {
+    let percent = Int((fraction * 100).rounded())
+    coveragePercent = percent
+    guard phase == .scanning else { return }
+    // "isn't improving much": under 3 points gained in the last 25 s of scanning, once past 40 %
+    let now = CACurrentMediaTime()
+    coverageHistory.append((now, percent))
+    coverageHistory.removeAll { now - $0.time > 25 }
+    if let first = coverageHistory.first, now - first.time > 20 {
+      coverageStalled = percent >= 40 && percent - first.percent < 3
+    }
+  }
+
+  func togglePause() {
+    guard phase == .scanning else { return }
+    paused.toggle()
   }
 
   private func roomProcessed(_ room: CapturedRoom, error: Error?) async {
+    overlay.showRoom(room)
     guard phase == .processingRoom || phase == .scanning else { return }
     ticker?.invalidate()
     if phase == .scanning {
@@ -219,7 +287,7 @@ final class CaptureController: NSObject, ObservableObject {
   /// Leave without finishing: whatever rooms are done are kept as a scan.
   func abandon() async {
     ticker?.invalidate()
-    if phase == .scanning || phase == .processingRoom { roomCaptureView.captureSession.stop() }
+    if phase == .scanning || phase == .processingRoom { roomSession.stop() }
     if !rooms.isEmpty {
       phase = .roomDone
       await finishProperty()
@@ -254,8 +322,10 @@ final class CaptureController: NSObject, ObservableObject {
       return
     }
     updateMap(frame)
-    considerDepth(frame)
-    considerAutoPhoto(frame)
+    if !paused {
+      considerDepth(frame)
+      considerAutoPhoto(frame)
+    }
     previousPose = (frame.timestamp, frame.camera.transform)
   }
 
@@ -386,6 +456,8 @@ final class CaptureController: NSObject, ObservableObject {
     // still, which may carry no depth) the live frame from the same moment
     let depthSource = frame.sceneDepth != nil ? frame : arSession.currentFrame
     let depth = depthSource.flatMap { recordDepth($0, photo: file) }
+    // what this photo saw (its LiDAR depth) is now photographed: the mesh turns green there
+    if let source = depthSource, let sample = DepthSample(source) { overlay.addPhoto(sample) }
     let scale = Float(size.width) / Float(frame.camera.imageResolution.width)
     var k = frame.camera.intrinsics
     k.columns.0.x *= scale; k.columns.1.y *= scale; k.columns.2.x *= scale; k.columns.2.y *= scale
@@ -432,22 +504,35 @@ final class CaptureController: NSObject, ObservableObject {
   }
 }
 
-/// RoomCaptureView's delegate. Kept apart from the controller because the protocol inherits
-/// NSCoding (meant for view controllers); RoomPlan calls it on the main thread.
-final class RoomViewDelegate: NSObject, RoomCaptureViewDelegate {
-  var onRoomData: ((CapturedRoomData) -> Void)?
-  var onRoom: ((CapturedRoom, Error?) -> Void)?
+/// RoomCaptureSession's delegate, kept apart from the main-actor controller. RoomPlan doesn't
+/// promise which thread it calls from, so everything hops to the main actor.
+final class RoomSessionDelegate: NSObject, RoomCaptureSessionDelegate, @unchecked Sendable {
+  @MainActor var onUpdate: ((CapturedRoom) -> Void)?
+  @MainActor var onInstruction: ((String?) -> Void)?
+  @MainActor var onEnd: ((CapturedRoomData, Error?) -> Void)?
 
-  override init() { super.init() }
-  required init?(coder: NSCoder) { super.init() }
-  func encode(with coder: NSCoder) {}
-
-  func captureView(shouldPresent roomDataForProcessing: CapturedRoomData, error: (any Error)?) -> Bool {
-    onRoomData?(roomDataForProcessing)
-    return true
+  func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
+    Task { @MainActor in self.onUpdate?(room) }
   }
 
-  func captureView(didPresent processedResult: CapturedRoom, error: (any Error)?) {
-    onRoom?(processedResult, error)
+  func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
+    let text = Self.text(instruction)
+    Task { @MainActor in self.onInstruction?(text) }
+  }
+
+  func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: (any Error)?) {
+    Task { @MainActor in self.onEnd?(data, error) }
+  }
+
+  static func text(_ instruction: RoomCaptureSession.Instruction) -> String? {
+    switch instruction {
+    case .moveCloseToWall: return "Move closer to the wall"
+    case .moveAwayFromWall: return "Move away from the wall"
+    case .slowDown: return "Slow down"
+    case .turnOnLight: return "Turn on more light"
+    case .lowTexture: return "Point at a part of the room with more detail"
+    case .normal: return nil
+    @unknown default: return nil
+    }
   }
 }

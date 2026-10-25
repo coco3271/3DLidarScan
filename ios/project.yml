@@ -55,6 +55,7 @@ targets:
       - path: LidarWalkthrough/FloorPlan.swift
       - path: LidarWalkthrough/MediaWriter.swift
       - path: LidarWalkthrough/MeshExporter.swift
+      - path: LidarWalkthrough/CoverageMap.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.coco3271.lidarwalkthrough.tests

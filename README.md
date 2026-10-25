@@ -69,8 +69,12 @@ Settings › General › VPN & Device Management and trust your developer certif
 ## Scanning a property
 
 1. Tap **+** and enter the address or a name. GPS and the street address are added automatically.
-2. Name the first room and walk slowly along the walls. Apple's RoomPlan draws the room
-   live. The app also records the LiDAR mesh, depth frames and automatic reference photos.
+2. Name the first room and walk slowly around it. The LiDAR mesh appears over the camera
+   image as you scan: **red** surfaces still need photos, **amber** are almost there,
+   **green** are captured. (Surfaces with no mesh haven't been reached by the LiDAR yet.)
+   RoomPlan's walls (white) and doors/windows (cyan) are outlined as it finds them, and the
+   **Photo detail** ring shows how much of the scanned mesh is captured. Point the camera at
+   red areas until they turn green; the app tells you when more circling stops helping.
 3. The app takes reference photos by itself as you move: one every ~0.4 m or ~17° turn,
    only when you're steady enough for a sharp shot, and full-resolution when the phone allows.
    At every spot you want as a tour stop, stand still and tap the **shutter** for a
@@ -120,7 +124,8 @@ python3 -m http.server 8000      # then http://localhost:8000/web/
   manifest.json            format house-capture/5, rooms, property name/address/GPS
   structure.json|usdz      all rooms merged by RoomPlan (2+ rooms)
   rooms/room-N.json|usdz   RoomPlan CapturedRoom per room (+ -mesh.usdz, -data.json)
-  mesh/room-N.ply          LiDAR mesh, classified faces (wall/floor/ceiling/door/…)
+  mesh/room-N.ply          LiDAR mesh, classified faces (wall/floor/ceiling/door/…), per-vertex photo
+                           coverage score + red/amber/green color (what still lacked photos)
   photos/photos.json       pose, intrinsics, GPS, heading, high-res flag for every photo
   photos/NNNN.jpg          photos (EXIF GPS; manual shots are full resolution)
   poses.csv                every photo + depth frame: x,y,z (m), direction, yaw/pitch, paired LiDAR frame, GPS

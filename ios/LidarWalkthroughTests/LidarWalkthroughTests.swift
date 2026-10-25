@@ -232,4 +232,125 @@ final class LidarWalkthroughTests: XCTestCase {
     XCTAssertEqual(WalkthroughBuilder.evenly(Array(0..<10), 5), [0, 2, 4, 6, 8])
     XCTAssertEqual(WalkthroughBuilder.evenly([1, 2], 5), [1, 2])
   }
+
+  // MARK: photo coverage (the red/green scan mesh)
+
+  func testVoxelKeysAndBoundarySplat() {
+    XCTAssertNotEqual(CoverageMap.key([0.01, 0, 0]), CoverageMap.key([0.06, 0, 0]))
+    XCTAssertNotEqual(CoverageMap.key([-0.01, 0, 0]), CoverageMap.key([0.01, 0, 0]), "negative side is its own voxel")
+    XCTAssertEqual(CoverageMap.key([0.011, 0.02, 0.03]), CoverageMap.key([0.039, 0.04, 0.001]))
+    XCTAssertEqual(CoverageMap.keys(around: [0.025, 0.025, 0.025]).count, 1, "center of a voxel: just that voxel")
+    let nearFace = CoverageMap.keys(around: [0.001, 0.025, 0.025])
+    XCTAssertEqual(nearFace.count, 2)
+    XCTAssertTrue(nearFace.contains(CoverageMap.key([-0.01, 0.025, 0.025])), "a wall on a voxel face credits both sides")
+    XCTAssertEqual(CoverageMap.keys(around: [0.001, 0.001, 0.049]).count, 8)
+    _ = CoverageMap.keys(around: [.nan, .infinity, -.infinity]) // must not trap
+  }
+
+  func testWeightFavorsCloseUpViews() {
+    XCTAssertEqual(CoverageMap.weight(distance: 0.8), 1)
+    XCTAssertEqual(CoverageMap.weight(distance: 2.35), 0.5, accuracy: 1e-5)
+    XCTAssertEqual(CoverageMap.weight(distance: 4), 0)
+    XCTAssertEqual(CoverageMap.band(0), 0)
+    XCTAssertEqual(CoverageMap.band(0.5), 1)
+    XCTAssertEqual(CoverageMap.band(1), 2)
+  }
+
+  func testEachPhotoCountsOncePerVoxelAndScoresCap() {
+    let map = CoverageMap()
+    let p = SIMD3<Float>(1.025, 0.025, 0.025)
+    map.add([(p, 1), (p + 0.001, 0.5)]) // same photo, same voxel: best weight once
+    XCTAssertEqual(map.score(at: p), 1)
+    map.add([(p, 1)])
+    map.add([(p, 1)])
+    XCTAssertEqual(map.score(at: p), CoverageMap.maxScore)
+    XCTAssertEqual(map.score(at: [5, 5, 5]), 0)
+    let v = map.version
+    map.add([])
+    XCTAssertEqual(map.version, v, "nothing added, nothing to recolor")
+  }
+
+  func testDepthPixelsUnprojectIntoTheWorld() {
+    // 3×3 depth at 2 m, principal point at the center pixel, camera 1 m up looking down -Z
+    var t = matrix_identity_float4x4
+    t.columns.3 = [0, 1, 0, 1]
+    let sample = DepthSample(width: 3, height: 3, depth: Array(repeating: 2, count: 9), confidence: nil,
+                             intrinsics: simd_float3x3([1, 0, 0], [0, 1, 0], [1, 1, 1]), cameraToWorld: t)
+    let pts = sample.pointsSeen(step: 1)
+    XCTAssertEqual(pts.count, 9)
+    let center = pts[4].position, right = pts[5].position, below = pts[7].position
+    XCTAssertEqual(simd_distance(center, [0, 1, -2]), 0, accuracy: 1e-6)
+    XCTAssertEqual(simd_distance(right, [2, 1, -2]), 0, accuracy: 1e-6, "image +u = camera +x")
+    XCTAssertEqual(simd_distance(below, [0, -1, -2]), 0, accuracy: 1e-6, "image +v (down) = camera -y")
+    XCTAssertEqual(pts[0].weight, CoverageMap.weight(distance: 2))
+    var lowConfidence = sample
+    lowConfidence.confidence = [0, 2, 2, 2, 0, 2, 2, 2, 2]
+    XCTAssertEqual(lowConfidence.pointsSeen(step: 1).count, 7, "low-confidence LiDAR pixels are skipped")
+  }
+
+  func testMeshCoverageSplitsTrianglesByBand() {
+    // triangle scores average their vertices: 2 → green, (2+0+2)/3 = 1.33 → green,
+    // (2+0+0)/3 = 0.67 → amber, 0 → red
+    let c = MeshCoverage(triangles: [0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 4, 5], scores: [2, 2, 2, 0, 0, 0])
+    XCTAssertEqual(c.bands[2], [0, 1, 2, 1, 3, 2])
+    XCTAssertEqual(c.bands[1], [2, 3, 4])
+    XCTAssertEqual(c.bands[0], [3, 4, 5])
+    XCTAssertEqual(c.capturedVertices, 3)
+    XCTAssertEqual(c.totalVertices, 6)
+    XCTAssertEqual(MeshCoverage(triangles: [0, 1, 9], scores: [1, 1]).bands.flatMap { $0 }, [], "bad indices are skipped")
+  }
+
+  func testPLYCarriesCoverageColors() throws {
+    let map = CoverageMap()
+    map.add([(SIMD3<Float>(0, 0, 0), 1)]) // Quad(y: 0) vertex 0 is at the origin
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("c-\(UUID().uuidString).ply")
+    defer { try? FileManager.default.removeItem(at: url) }
+    _ = try MeshExporter.writePLY(pieces: [Quad(y: 0)], to: url, coverage: map)
+    let data = try Data(contentsOf: url)
+    let end = try XCTUnwrap(data.range(of: Data("end_header\n".utf8))).upperBound
+    func f32(_ at: Int) -> Float { Float(bitPattern: data.subdata(in: at..<at + 4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }) }
+    XCTAssertEqual(f32(end + 24), 1, "vertex 0 coverage score")
+    XCTAssertEqual([data[end + 28], data[end + 29], data[end + 30]], [56, 237, 117], "captured = green")
+    XCTAssertEqual(f32(end + 32 * 3 + 24), 0, "vertex 3 was never photographed")
+    XCTAssertEqual([data[end + 32 * 3 + 28], data[end + 32 * 3 + 29]], [255, 59], "needs photos = red")
+  }
+
+  /// The synthetic scan's photos, through their own LiDAR depth frames, must turn a good part
+  /// of its mesh green/amber: same numbers as an independent Python implementation (47 % seen,
+  /// 16 % captured with only 14 photos)
+  func testFixtureCoverageFromPhotoDepth() throws {
+    let dir = try fixture()
+    let photos = try BundleJSON.decoder.decode([PhotoRecord].self, from: Data(contentsOf: dir.appendingPathComponent("photos/photos.json")))
+    let frames = try BundleJSON.decoder.decode([DepthRecord].self, from: Data(contentsOf: dir.appendingPathComponent("depth/frames.json")))
+    let byFile = Dictionary(uniqueKeysWithValues: frames.map { ($0.file, $0) })
+    let map = CoverageMap()
+    for photo in photos {
+      let f = try XCTUnwrap(byFile[photo.depthFrame ?? ""])
+      let raw = try (Data(contentsOf: dir.appendingPathComponent(f.file)) as NSData).decompressed(using: .zlib) as Data
+      let halves = raw.withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
+      let depth = halves.map { h -> Float in
+        let e = Int((h >> 10) & 0x1f), m = Float(h & 0x3ff)
+        return e == 0 ? m / 1024 * pow(2, -14) : (1 + m / 1024) * pow(2, Float(e - 15))
+      }
+      let k = f.intrinsics
+      map.add(DepthSample(width: f.width, height: f.height, depth: depth, confidence: nil,
+                          intrinsics: simd_float3x3([k[0], k[1], k[2]], [k[3], k[4], k[5]], [k[6], k[7], k[8]]),
+                          cameraToWorld: simd_float4x4(columnMajor: f.transform)).pointsSeen())
+    }
+    let ply = try Data(contentsOf: dir.appendingPathComponent("mesh/room-1.ply"))
+    let end = try XCTUnwrap(ply.range(of: Data("end_header\n".utf8))).upperBound
+    let header = String(decoding: ply[..<end], as: UTF8.self)
+    let count = Int(header.components(separatedBy: "element vertex ")[1].split(separator: "\n")[0])!
+    let vertices = (0..<count).map { i -> SIMD3<Float> in
+      ply.subdata(in: end + i * 32..<end + i * 32 + 12).withUnsafeBytes {
+        SIMD3($0.loadUnaligned(fromByteOffset: 0, as: Float.self), $0.loadUnaligned(fromByteOffset: 4, as: Float.self),
+              $0.loadUnaligned(fromByteOffset: 8, as: Float.self))
+      }
+    }
+    let scores = map.scores(for: vertices)
+    let seen = Float(scores.filter { $0 > 0.05 }.count) / Float(count)
+    let captured = Float(scores.filter { $0 >= CoverageMap.goodScore }.count) / Float(count)
+    XCTAssertEqual(seen, 0.47, accuracy: 0.05)
+    XCTAssertEqual(captured, 0.16, accuracy: 0.05)
+  }
 }

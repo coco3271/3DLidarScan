@@ -7,17 +7,23 @@ import Metal
 ///   vertex: x y z nx ny nz coverage red green blue inroom
 ///   face:   vertex_indices class   (ARMeshClassification: 0 none 1 wall 2 floor 3 ceiling
 ///                                   4 table 5 seat 6 window 7 door)
-/// Colors are left neutral: the walkthrough viewer paints the mesh from the photos.
+/// `coverage` is the photo coverage score (0 = no photo saw it, ≥ 1 = well photographed) and
+/// the color shows it like the live scan view: red needs photos, amber almost, green captured.
+/// (The walkthrough viewer paints the mesh from the photos themselves.)
 enum MeshExporter {
-  static func writePLY(anchors: [ARMeshAnchor], to url: URL) throws -> MeshRecord {
-    var record = try writePLY(pieces: anchors.map(AnchorPiece.init), to: url)
+  private static let neutral: (UInt8, UInt8, UInt8) = (200, 200, 200)
+  /// red (needs photos), amber, green (captured): same as the live scan view
+  private static let bandColors: [(UInt8, UInt8, UInt8)] = [(255, 59, 59), (255, 184, 51), (56, 237, 117)]
+
+  static func writePLY(anchors: [ARMeshAnchor], to url: URL, coverage: CoverageMap? = nil) throws -> MeshRecord {
+    var record = try writePLY(pieces: anchors.map(AnchorPiece.init), to: url, coverage: coverage)
     record.anchors = anchors.count
     return record
   }
 
   /// Several meshes concatenated into one PLY; each piece's face indices are offset past the
   /// vertices of the pieces before it.
-  static func writePLY(pieces: [any MeshPiece], to url: URL) throws -> MeshRecord {
+  static func writePLY(pieces: [any MeshPiece], to url: URL, coverage: CoverageMap? = nil) throws -> MeshRecord {
     let vertexCount = pieces.reduce(0) { $0 + $1.vertexCount }
     let faceCount = pieces.reduce(0) { $0 + $1.faceCount }
     var header = "ply\nformat binary_little_endian 1.0\ncomment 3D LiDAR Scan: ARKit world space, meters, +Y up\n"
@@ -33,12 +39,15 @@ enum MeshExporter {
     out.data.append(Data(header.utf8))
 
     for piece in pieces {
-      for i in 0..<piece.vertexCount {
-        let (p, n) = piece.vertex(i)
+      let vertices = (0..<piece.vertexCount).map { piece.vertex($0) }
+      let scores = coverage?.scores(for: vertices.map(\.0)) ?? []
+      for (i, (p, n)) in vertices.enumerated() {
+        let score = i < scores.count ? scores[i] : 0
         out.f32(p.x); out.f32(p.y); out.f32(p.z)
         out.f32(n.x); out.f32(n.y); out.f32(n.z)
-        out.f32(0) // coverage
-        out.u8(200); out.u8(200); out.u8(200); out.u8(1)
+        out.f32(score)
+        let rgb = coverage == nil ? neutral : bandColors[CoverageMap.band(score)]
+        out.u8(rgb.0); out.u8(rgb.1); out.u8(rgb.2); out.u8(1)
         try out.flushIfNeeded()
       }
     }
