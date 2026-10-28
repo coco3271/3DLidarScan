@@ -25,7 +25,7 @@ python3 tests/test_kit.py "$OUT"
 echo "== make_walkthrough.py"
 python3 ai-kit/make_walkthrough.py "$OUT/FakeHouse.zip" -o "$OUT/walkthrough.html"
 python3 ai-kit/make_walkthrough.py "$OUT/FakeHouse" -o "$OUT/walkthrough-from-folder.html" > /dev/null
-for v in single-room no-mesh no-depth no-photos ascii-ply raw-depth; do
+for v in single-room no-mesh no-depth no-photos ascii-ply raw-depth landscape; do
   python3 ai-kit/make_walkthrough.py "$OUT/variants/$v" -o "$OUT/variants/$v.html" > /dev/null
 done
 python3 ai-kit/make_walkthrough.py "$OUT/variants/flat-zip.zip" -o "$OUT/variants/flat-zip.html" > /dev/null
@@ -33,7 +33,7 @@ python3 ai-kit/make_walkthrough.py "$OUT/variants/flat-zip.zip" -o "$OUT/variant
 echo "== make_model.py"
 # the fake photos are small (480 px): allow coarser floor textures so that path is exercised
 python3 ai-kit/make_model.py "$OUT/FakeHouse.zip" -o "$OUT/model" --min-texture-res 60
-for v in single-room no-depth no-photos; do
+for v in single-room no-depth no-photos landscape; do
   python3 ai-kit/make_model.py "$OUT/variants/$v" -o "$OUT/variants/$v-model" > /dev/null
 done
 python3 tests/test_model.py "$OUT"
@@ -49,6 +49,7 @@ if "$TP" -c "import torch" 2>/dev/null; then
   python3 ai-kit/splat/playcanvas.py "$OUT/splat" --bundle "$OUT/FakeHouse.zip"
   python3 ai-kit/splat/make_splat_html.py "$OUT/splat" --dataset "$OUT/dataset"
   "$TP" tests/test_splat.py "$OUT"
+  "$TP" tests/test_server.py "$OUT"
 else
   echo "torch not installed: skipping (pip install torch, or set TORCH_PYTHON)"
 fi
@@ -59,4 +60,7 @@ node tests/e2e.mjs "$OUT"
 echo "== photo cameras vs photos"
 python3 tests/compare_poses.py "$OUT" "$OUT/FakeHouse"
 python3 tests/compare_poses.py "$OUT" "$OUT/FakeHouse" model-
+echo "== landscape photos (the app scans sideways)"
+python3 tests/compare_poses.py "$OUT" "$OUT/variants/landscape" landscape-
+python3 tests/compare_poses.py "$OUT" "$OUT/variants/landscape" landscape-model-
 echo "OK — screenshots in $OUT"

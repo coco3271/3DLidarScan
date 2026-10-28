@@ -431,4 +431,32 @@ final class LidarWalkthroughTests: XCTestCase {
     XCTAssertEqual(times.count, written)
     for (t, f) in zip(times.sorted(), frames) { XCTAssertEqual(t, f.time, accuracy: 0.001) }
   }
+
+  // MARK: landscape capture
+
+  func testHoldOrientationFromGravity() {
+    // CoreMotion gravity in the device frame: upright = (0, -1, 0), sideways = (±1, 0, 0)
+    XCTAssertEqual(HoldOrientation.classify(gravity: [0, -1, 0], previous: .flat), .portrait)
+    XCTAssertEqual(HoldOrientation.classify(gravity: [-1, 0, 0], previous: .flat), .landscape)
+    XCTAssertEqual(HoldOrientation.classify(gravity: [0.98, 0.1, -0.1], previous: .portrait), .landscape)
+    // tilted near 45°: keeps the current answer (dead band), no flicker
+    XCTAssertEqual(HoldOrientation.classify(gravity: [0.68, -0.73, 0], previous: .landscape), .landscape)
+    XCTAssertEqual(HoldOrientation.classify(gravity: [0.73, -0.68, 0], previous: .portrait), .portrait)
+    // pointing at the floor: ambiguous, keep what we had
+    XCTAssertEqual(HoldOrientation.classify(gravity: [0.1, -0.1, -0.99], previous: .landscape), .landscape)
+    XCTAssertEqual(HoldOrientation.classify(gravity: [0.1, -0.1, -0.99], previous: .portrait), .portrait)
+  }
+
+  func testEXIFOrientationFollowsTheHold() {
+    // portrait (the old way): sensor +X points down → 6, as the app always wrote
+    XCTAssertEqual(exifOrientation(cameraToWorld: pose([0, 1.5, 0], yaw: 0.7, pitch: 0.1)), 6)
+    // sideways, sensor upright → 1; upside down → 3; the other portrait → 8
+    let f = SIMD3<Float>(0, 0, -1), up = SIMD3<Float>(0, 1, 0), right = simd_cross(f, up)
+    let landscape = simd_float4x4(SIMD4(right, 0), SIMD4(up, 0), SIMD4(-f, 0), SIMD4(0, 1.5, 0, 1))
+    XCTAssertEqual(exifOrientation(cameraToWorld: landscape), 1)
+    let flipped = simd_float4x4(SIMD4(-right, 0), SIMD4(-up, 0), SIMD4(-f, 0), SIMD4(0, 1.5, 0, 1))
+    XCTAssertEqual(exifOrientation(cameraToWorld: flipped), 3)
+    let other = simd_float4x4(SIMD4(up, 0), SIMD4(-right, 0), SIMD4(-f, 0), SIMD4(0, 1.5, 0, 1))
+    XCTAssertEqual(exifOrientation(cameraToWorld: other), 8)
+  }
 }

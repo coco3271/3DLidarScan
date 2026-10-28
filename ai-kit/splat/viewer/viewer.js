@@ -14,6 +14,14 @@
 
 const BG = '#0b1626'
 
+/** How the phone was held when a photo was taken, from its pose (the same rule as the app's EXIF
+ *  orientation): `right`/`up` = how much the sensor's x / y axes point up in the world. Returns
+ *  the roll that turns the sensor camera upright, and whether the picture is portrait. */
+function photoHold(right, up) {
+  if (Math.abs(up) >= Math.abs(right)) return { roll: up >= 0 ? 0 : Math.PI, portrait: false } // sideways (landscape)
+  return { roll: right < 0 ? Math.PI / 2 : -Math.PI / 2, portrait: true }                       // upright (portrait)
+}
+
 export async function startSplat(THREE, container, source) {
   const ui = buildUI(container)
   const has = new Set(source.files)
@@ -70,13 +78,14 @@ export async function startSplat(THREE, container, source) {
   }
   frameHouse()
 
-  // photo cameras (upright: sensor frame turned 90°, vertical fov from the sensor's width)
+  // photo cameras, turned upright the way the phone was held (portrait or landscape)
   const photos = (cams.cameras || []).filter((c) => c.photo && has.has(c.photo))
-  const upright = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2)
   const photoPose = (c) => {
     const m = new THREE.Matrix4().fromArray(c.transform.flat()).transpose() // row-major → three
-    return { pos: new THREE.Vector3().setFromMatrixPosition(m), quat: new THREE.Quaternion().setFromRotationMatrix(m).multiply(upright),
-             fov: THREE.MathUtils.radToDeg(2 * Math.atan(c.w / 2 / c.fl_x)) }
+    const hold = photoHold(c.transform[1][0], c.transform[1][1])
+    const roll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), hold.roll)
+    return { pos: new THREE.Vector3().setFromMatrixPosition(m), quat: new THREE.Quaternion().setFromRotationMatrix(m).multiply(roll),
+             fov: THREE.MathUtils.radToDeg(2 * Math.atan(hold.portrait ? c.w / 2 / c.fl_x : c.h / 2 / c.fl_y)) }
   }
 
   let mode = 'dollhouse', photoIndex = -1, exact = null, dollhouseView = null

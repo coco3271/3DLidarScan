@@ -15,7 +15,9 @@ import UIKit
 @MainActor
 final class CaptureController: NSObject, ObservableObject {
   enum Phase: Equatable {
-    case ready, scanning, processingRoom, roomDone, finishing, finished
+    /// relocalizing: continuing a saved scan, waiting for ARKit to recognize the place
+    /// reviewing: "Finish scanning" was tapped; tracking goes on, so Resume continues the room
+    case ready, relocalizing, scanning, reviewing, processingRoom, roomDone, finishing, finished
     case failed(String)
   }
 
@@ -52,6 +54,25 @@ final class CaptureController: NSObject, ObservableObject {
   /// this room's video so far
   @Published private(set) var videoSeconds: TimeInterval = 0
   @Published private(set) var videoFrames = 0
+  /// the room's finished video segments (Finish scanning → Resume makes a new one), kept here
+  /// until the room is saved
+  private var roomVideos: [VideoRecord] = []
+  private var segmentStart: TimeInterval = 0
+  /// a segment being closed (the file is finalized in the background)
+  private var closingSegment: Task<Void, Never>?
+  /// "Start scanning" was tapped while the phone was upright: starts once it's turned sideways
+  @Published private(set) var waitingForLandscape = false
+  /// scanning but held upright: recording pauses until the phone is sideways again
+  @Published private(set) var heldUpright = false
+  private var hold: HoldOrientation = .flat
+  /// continuing a saved scan: its ARKit world map, to line new rooms up with the old ones
+  private var worldMapToLoad: ARWorldMap?
+  private var sawRelocalizing = false
+  /// this session's coordinates are the scan's: a new scan, or a continued one after ARKit
+  /// recognized the place (only then is the world map saved again)
+  private var worldAligned = true
+  /// rooms already in this scan (from an earlier session)
+  @Published private(set) var earlierRooms = 0
   /// frames from the camera, ~60/s on the render thread: video + speed
   private let tap = FrameTap()
   private var lastSpeedWarning: CFTimeInterval = 0
@@ -123,12 +144,78 @@ final class CaptureController: NSObject, ObservableObject {
     overlay.setFrameHandler { frame in tap.handle(frame) }
   }
 
+  /// Continue a saved scan: load what's there, and relocalize in its ARKit world map so new
+  /// rooms land in the same coordinates (nil when the scan has no world map)
+  convenience init?(continuing folder: URL) {
+    let read = { (p: String) in try? Data(contentsOf: folder.appendingPathComponent(p)) }
+    guard let data = read("manifest.json"), let m = try? BundleJSON.decoder.decode(Manifest.self, from: data),
+          let mapFile = m.worldMap, let mapData = read(mapFile),
+          let map = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: mapData) else { return nil }
+    self.init(folder: folder, propertyName: m.property?.name ?? m.houseName ?? folder.lastPathComponent)
+    manifest = m
+    photos = read(m.photos).flatMap { try? BundleJSON.decoder.decode([PhotoRecord].self, from: $0) } ?? []
+    depthFrames = read(m.depthFrames ?? "depth/frames.json").flatMap { try? BundleJSON.decoder.decode([DepthRecord].self, from: $0) } ?? []
+    rooms = m.rooms.compactMap { r in r.file.isEmpty ? nil : read(r.file).flatMap { try? BundleJSON.decoder.decode(CapturedRoom.self, from: $0) } }
+    roomIndex = (m.rooms.map(\.index).max() ?? -1) + 1
+    roomName = "Room \(roomIndex + 1)"
+    nextPhoto = (photos.compactMap { Int(($0.file as NSString).lastPathComponent.prefix(4)) }.max() ?? -1) + 1
+    photoCount = photos.count
+    manualPhotoCount = photos.filter(\.manual).count
+    depthFrameCount = depthFrames.count
+    photoSpots = photos.map { MapSpot(simd_float4x4(columnMajor: $0.transform), manual: $0.manual) }
+    earlierRooms = m.rooms.count
+    worldMapToLoad = map
+    worldAligned = false
+  }
+
+  /// The phone's hold changed (from HoldMonitor)
+  func setHold(_ h: HoldOrientation) {
+    hold = h
+    if waitingForLandscape, h == .landscape {
+      waitingForLandscape = false
+      startRoom()
+    }
+    let upright = h == .portrait && (phase == .scanning)
+    if upright != heldUpright {
+      heldUpright = upright
+      if upright { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+      tap.setRecording(!paused && !upright)
+    }
+  }
+
+  /// "Start scanning": now if the phone is sideways, else as soon as it is
+  func requestStart() {
+    if hold == .portrait { waitingForLandscape = true } else { startRoom() }
+  }
+
   static var isSupported: Bool { RoomCaptureSession.isSupported }
 
   // MARK: rooms
 
   func startRoom() {
     guard phase == .ready || phase == .roomDone else { return }
+    if let map = worldMapToLoad {
+      // first, find our place in the saved scan's world (RoomPlan starts once ARKit has)
+      worldMapToLoad = nil
+      let config = ARWorldTrackingConfiguration()
+      config.initialWorldMap = map
+      if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { config.sceneReconstruction = .meshWithClassification }
+      if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) { config.frameSemantics.insert(.sceneDepth) }
+      arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
+      sawRelocalizing = false
+      phase = .relocalizing
+      instruction = "Point at a part of the property you already scanned, so the new rooms line up"
+      ticker?.invalidate()
+      ticker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        MainActor.assumeIsolated { self?.tick() }
+      }
+      return
+    }
+    beginRoom()
+  }
+
+  /// Relocalizing done (or not needed): RoomPlan + recording start
+  private func beginRoom() {
     warning = nil
     if roomName.trimmingCharacters(in: .whitespaces).isEmpty { roomName = "Room \(roomIndex + 1)" }
     location.start()
@@ -140,9 +227,9 @@ final class CaptureController: NSObject, ObservableObject {
     coverageHistory = []
     if paused { paused = false }
     roomSession.run(configuration: RoomCaptureSession.Configuration())
-    tap.startRecording(VideoRecorder(url: folder.appendingPathComponent("video/room-\(roomIndex).mov"), room: roomIndex))
+    roomVideos = []
     videoSeconds = 0
-    videoFrames = 0
+    startSegment()
     phase = .scanning
     UIApplication.shared.isIdleTimerDisabled = true
     ticker?.invalidate()
@@ -151,10 +238,58 @@ final class CaptureController: NSObject, ObservableObject {
     }
   }
 
+  /// A new video segment for this room: video/room-N.mov, then room-N-2.mov, … after Resume
+  private func startSegment() {
+    let n = roomVideos.count
+    let name = n == 0 ? "room-\(roomIndex)" : "room-\(roomIndex)-\(n + 1)"
+    tap.startRecording(VideoRecorder(url: folder.appendingPathComponent("video/\(name).mov"), room: roomIndex))
+    tap.setRecording(!paused && !heldUpright)
+    segmentStart = videoSeconds
+  }
+
+  /// Close the current video segment: detach it from the camera feed now, finalize the file in
+  /// the background (endSegment() waits for that)
+  private func closeSegment() {
+    guard let recorder = tap.stopRecording() else { return }
+    let previous = closingSegment
+    let folder = folder
+    closingSegment = Task {
+      await previous?.value
+      if let video = await recorder.finish(folder: folder) { self.roomVideos.append(video) }
+    }
+  }
+
+  /// Close the current segment and wait until every segment's file is finished
+  private func endSegment() async {
+    closeSegment()
+    await closingSegment?.value
+    closingSegment = nil
+  }
+
+  /// "Finish scanning": stop recording and look at what you have. ARKit and RoomPlan keep
+  /// tracking, so Resume continues the same room in the same coordinates.
+  func finishScanning() {
+    guard phase == .scanning else { return }
+    phase = .reviewing
+    paused = true
+    heldUpright = false
+    closeSegment()
+  }
+
+  /// Back to scanning the same room (a new video segment)
+  func resumeScanning() {
+    guard phase == .reviewing else { return }
+    paused = false
+    previousPose = nil
+    lastAutoPhoto = nil
+    startSegment()
+    phase = .scanning
+  }
+
   /// Done with this room: save the LiDAR mesh while ARKit still has it, then let RoomPlan
   /// build the room. The ARSession keeps running so the next room lands in the same world.
   func finishRoom() {
-    guard phase == .scanning else { return }
+    guard phase == .scanning || phase == .reviewing else { return }
     phase = .processingRoom
     ticker?.invalidate()
     Task {
@@ -166,10 +301,9 @@ final class CaptureController: NSObject, ObservableObject {
   /// The room's scan is over: save its LiDAR mesh and close its video
   private func endRecording() async {
     await exportMesh()
-    guard let recorder = tap.stopRecording() else { return }
-    if let video = await recorder.finish(folder: folder) {
-      manifest.videos = (manifest.videos ?? []).filter { $0.room != video.room } + [video]
-    }
+    await endSegment()
+    manifest.videos = (manifest.videos ?? []) + roomVideos
+    roomVideos = []
   }
 
   /// Write ARKit's current LiDAR mesh (the whole session so far) as mesh/room-N.ply
@@ -190,7 +324,7 @@ final class CaptureController: NSObject, ObservableObject {
   /// RoomPlan finished capturing (we stopped it, or it stopped on its own): keep its raw data,
   /// then build the final room model from it
   private func roomEnded(_ data: CapturedRoomData, error: Error?) async {
-    guard phase == .processingRoom || phase == .scanning else { return }
+    guard phase == .processingRoom || phase == .scanning || phase == .reviewing else { return }
     if let json = try? JSONEncoder().encode(data) {
       try? json.write(to: folder.appendingPathComponent("rooms/room-\(roomIndex)-data.json"))
     }
@@ -204,7 +338,7 @@ final class CaptureController: NSObject, ObservableObject {
 
   /// RoomPlan couldn't build a model: keep the room's mesh, photos and depth anyway
   private func roomFailed(_ error: Error) async {
-    if phase == .scanning {
+    if phase == .scanning || phase == .reviewing {
       phase = .processingRoom
       await endRecording()
     }
@@ -237,14 +371,14 @@ final class CaptureController: NSObject, ObservableObject {
   func togglePause() {
     guard phase == .scanning else { return }
     paused.toggle()
-    tap.setRecording(!paused)
+    tap.setRecording(!paused && !heldUpright)
   }
 
   private func roomProcessed(_ room: CapturedRoom, error: Error?) async {
     overlay.showRoom(room)
-    guard phase == .processingRoom || phase == .scanning else { return }
+    guard phase == .processingRoom || phase == .scanning || phase == .reviewing else { return }
     ticker?.invalidate()
-    if phase == .scanning {
+    if phase == .scanning || phase == .reviewing {
       // RoomPlan ended the room by itself (error, tracking lost): still keep the mesh and video
       phase = .processingRoom
       await endRecording()
@@ -302,6 +436,13 @@ final class CaptureController: NSObject, ObservableObject {
     }
     manifest.property?.address = location.address
     manifest.endedAt = Date()
+    // the world map lets "Continue scanning" line new rooms up with these, later
+    finishingStep = "Saving the world map…"
+    if worldAligned, let map = await currentWorldMap(),
+       let data = try? NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true),
+       (try? data.write(to: folder.appendingPathComponent("worldmap.arworldmap"))) != nil {
+      manifest.worldMap = "worldmap.arworldmap"
+    }
     if let c = arSession.configuration as? ARWorldTrackingConfiguration {
       manifest.sceneReconstruction = "reconstruction=\(c.sceneReconstruction.rawValue) semantics=\(c.frameSemantics.rawValue)"
     }
@@ -312,15 +453,23 @@ final class CaptureController: NSObject, ObservableObject {
     phase = rooms.isEmpty ? .failed("No rooms were captured.") : .finished
   }
 
+  private func currentWorldMap() async -> ARWorldMap? {
+    await withCheckedContinuation { (c: CheckedContinuation<ARWorldMap?, Never>) in
+      arSession.getCurrentWorldMap { map, _ in c.resume(returning: map) }
+    }
+  }
+
   /// Leave without finishing: whatever rooms are done are kept as a scan.
   func abandon() async {
     ticker?.invalidate()
-    if phase == .scanning || phase == .processingRoom { roomSession.stop() }
-    // the room in progress is discarded, its video too
-    if let recorder = tap.stopRecording(), let video = await recorder.finish(folder: folder) {
+    if phase == .scanning || phase == .reviewing || phase == .processingRoom { roomSession.stop() }
+    // the room in progress is discarded, its video segments too
+    await endSegment()
+    for video in roomVideos {
       try? FileManager.default.removeItem(at: folder.appendingPathComponent(video.file))
       try? FileManager.default.removeItem(at: folder.appendingPathComponent(video.frames))
     }
+    roomVideos = []
     if !rooms.isEmpty {
       phase = .roomDone
       await finishProperty()
@@ -348,6 +497,19 @@ final class CaptureController: NSObject, ObservableObject {
   // MARK: per-frame recording
 
   private func tick() {
+    if phase == .relocalizing, let frame = arSession.currentFrame {
+      // ARKit reports .limited(.relocalizing) until it recognizes the saved place, then .normal
+      switch frame.camera.trackingState {
+      case .limited(.relocalizing): sawRelocalizing = true
+      case .normal where sawRelocalizing || frame.worldMappingStatus == .mapped:
+        instruction = nil
+        worldAligned = true
+        phase = .ready
+        beginRoom()
+      default: break
+      }
+      return
+    }
     guard phase == .scanning, let frame = arSession.currentFrame else { return }
     ensureMeshAndDepth(now: frame.timestamp)
     updateMotion()
@@ -396,7 +558,7 @@ final class CaptureController: NSObject, ObservableObject {
       motion = m.level
     }
     let v = tap.videoProgress()
-    videoSeconds = v.seconds
+    videoSeconds = segmentStart + v.seconds
     videoFrames = v.frames
   }
 
@@ -499,7 +661,8 @@ final class CaptureController: NSObject, ObservableObject {
     let file = String(format: "photos/%04d.jpg", nextPhoto)
     let geo = location.sample
     let maxEdge = manual ? Self.maxManualEdge : Self.maxAutoEdge
-    guard let size = writer.writePhoto(frame.capturedImage, to: folder.appendingPathComponent(file), maxEdge: maxEdge, geo: geo) else { return }
+    guard let size = writer.writePhoto(frame.capturedImage, to: folder.appendingPathComponent(file), maxEdge: maxEdge, geo: geo,
+                                       orientation: exifOrientation(cameraToWorld: frame.camera.transform)) else { return }
     nextPhoto += 1
     // the LiDAR depth for this exact view: the photo's own frame, or (for a full-resolution
     // still, which may carry no depth) the live frame from the same moment

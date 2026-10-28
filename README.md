@@ -147,6 +147,15 @@ you go:
   frames;
 - the LiDAR mesh turns from red to green as you film.
 
+**Scanning flow.**
+- Hold the phone **sideways**: scanning is landscape, and turning it upright pauses the
+  recording with a prompt.
+- **Finish** stops recording, and **Resume** continues the same room; **Save room** keeps it.
+- The project screen plays each room's video and can **Continue scanning** later; new rooms
+  line up via the saved ARKit world map.
+- **Process World** sends the scan to your GPU processing server (`ai-kit/splat/server.py`)
+  and shows the photoreal World in the app.
+
 **Processing.** The pipeline picks sharp keyframes from the video, pairs them with LiDAR depth,
 and trains Gaussian splats. It writes our viewer (`splat.html`) and PlayCanvas's files
 (`scene.sog`, `playcanvas.html`; edit them in [SuperSplat](https://superspl.at/editor)).

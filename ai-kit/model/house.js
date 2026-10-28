@@ -24,6 +24,14 @@
 
 const GRID_BG = '#0b1626'
 
+/** How the phone was held when a photo was taken, from its pose (the same rule as the app's EXIF
+ *  orientation): `right`/`up` = how much the sensor's x / y axes point up in the world. Returns
+ *  the roll that turns the sensor camera upright, and whether the picture is portrait. */
+function photoHold(right, up) {
+  if (Math.abs(up) >= Math.abs(right)) return { roll: up >= 0 ? 0 : Math.PI, portrait: false } // sideways (landscape)
+  return { roll: right < 0 ? Math.PI / 2 : -Math.PI / 2, portrait: true }                       // upright (portrait)
+}
+
 export async function startModel(THREE, container, source) {
   const ui = buildUI(container)
   const text = async (p) => new TextDecoder().decode(await source.read(p))
@@ -434,10 +442,12 @@ export async function startModel(THREE, container, source) {
     photoIndex = (i + photos.length) % photos.length
     const p = photos[photoIndex]
     const m4 = new THREE.Matrix4().fromArray(p.transform)
+    const hold = photoHold(p.transform[1], p.transform[5])
     exact = {
       pos: new THREE.Vector3().setFromMatrixPosition(m4),
-      quat: new THREE.Quaternion().setFromRotationMatrix(m4).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2)),
-      fov: THREE.MathUtils.radToDeg(2 * Math.atan(p.width / 2 / p.fx)),
+      // turned upright the way the phone was held (portrait or landscape)
+      quat: new THREE.Quaternion().setFromRotationMatrix(m4).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), hold.roll)),
+      fov: THREE.MathUtils.radToDeg(2 * Math.atan(hold.portrait ? p.width / 2 / p.fx : p.height / 2 / (p.fy || p.fx))),
     }
     walk.pos.copy(exact.pos)
     if (mode !== 'photo') setMode('photo')

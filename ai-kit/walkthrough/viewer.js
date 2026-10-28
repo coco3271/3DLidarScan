@@ -19,6 +19,14 @@ const CLASS_COLORS = [ // ARMeshClassification: none wall floor ceiling table se
 const EYE_HEIGHT = 1.6
 const MAX_COLOR_VIEWS = 400
 
+/** How the phone was held when a photo was taken, from its pose (the same rule as the app's EXIF
+ *  orientation): `right`/`up` = how much the sensor's x / y axes point up in the world. Returns
+ *  the roll that turns the sensor camera upright, and whether the picture is portrait. */
+function photoHold(right, up) {
+  if (Math.abs(up) >= Math.abs(right)) return { roll: up >= 0 ? 0 : Math.PI, portrait: false } // sideways (landscape)
+  return { roll: right < 0 ? Math.PI / 2 : -Math.PI / 2, portrait: true }                       // upright (portrait)
+}
+
 export async function startWalkthrough(THREE, container, source) {
   const ui = buildUI(container)
   const status = (text) => { ui.status.textContent = text; ui.status.hidden = !text }
@@ -208,12 +216,14 @@ export async function startWalkthrough(THREE, container, source) {
   const Z_AXIS = new THREE.Vector3(0, 0, 1)
   const tmpDir = new THREE.Vector3()
 
-  /** The camera that took photo p: ARKit pose, turned upright (image up = sensor -X), vertical FOV from fx */
+  /** The camera that took photo p: ARKit pose, turned upright the way the phone was held (portrait:
+   *  image up = sensor -X; landscape: sensor +Y), vertical FOV from the matching focal length */
   function photoCamera(p) {
     const m = new THREE.Matrix4().fromArray(p.transform)
     const pos = new THREE.Vector3().setFromMatrixPosition(m)
-    const quat = new THREE.Quaternion().setFromRotationMatrix(m).multiply(new THREE.Quaternion().setFromAxisAngle(Z_AXIS, Math.PI / 2))
-    const fov = THREE.MathUtils.radToDeg(2 * Math.atan(p.width / 2 / p.intrinsics[0]))
+    const hold = photoHold(p.transform[1], p.transform[5])
+    const quat = new THREE.Quaternion().setFromRotationMatrix(m).multiply(new THREE.Quaternion().setFromAxisAngle(Z_AXIS, hold.roll))
+    const fov = THREE.MathUtils.radToDeg(2 * Math.atan(hold.portrait ? p.width / 2 / p.intrinsics[0] : p.height / 2 / p.intrinsics[4]))
     return { pos, quat, fov }
   }
 

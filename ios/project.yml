@@ -35,13 +35,18 @@ targets:
         CFBundleDisplayName: 3D LiDAR Scan
         NSCameraUsageDescription: The camera and LiDAR scanner film and measure each room for your 3D walkthrough.
         NSLocationWhenInUseUsageDescription: Your location tags the property and each photo so the walkthrough knows where it was taken.
+        NSLocalNetworkUsageDescription: To send scans to a processing server on your network.
+        # a processing server on the same Wi-Fi (http://192.168.x.x:8787) is plain HTTP
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         UIRequiredDeviceCapabilities: [arkit]
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
         UIRequiresFullScreen: true
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown]
+        # portrait everywhere except while scanning, which is landscape (see OrientationLock)
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         ITSAppUsesNonExemptEncryption: false
   # Logic tests (no LiDAR needed): compile the app's own sources that don't touch RoomPlan and
   # run in the iOS Simulator. CI passes a synthetic scan in with TEST_RUNNER_FIXTURE_BUNDLE.
@@ -58,6 +63,7 @@ targets:
       - path: LidarWalkthrough/CoverageMap.swift
       - path: LidarWalkthrough/Motion.swift
       - path: LidarWalkthrough/VideoRecorder.swift
+      - path: LidarWalkthrough/Orientation.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.coco3271.lidarwalkthrough.tests

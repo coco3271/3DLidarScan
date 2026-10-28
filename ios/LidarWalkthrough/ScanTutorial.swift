@@ -9,14 +9,14 @@ struct ScanTutorial: View {
   init(done: @escaping () -> Void) { self.done = done }
 
   private let pages: [(symbol: String, color: Color, title: String, text: String)] = [
-    ("video.fill", .red, "Film the room like a slow video",
-     "The app records video while the LiDAR measures. Every frame is saved with exactly where the phone was and which way it pointed, and the 3D scene is rebuilt from them."),
+    ("iphone.landscape", .red, "Hold your iPhone sideways and film",
+     "Scanning is landscape: every frame sees more of the room. The app records video while the LiDAR measures, and saves exactly where the phone was and which way it pointed for every frame. If you turn it upright, recording pauses until you turn it back."),
     ("tortoise.fill", .green, "Move slowly and smoothly",
-     "About one small step per second, and turn slowly. Fast moves blur the video. The speed meter turns red and the phone buzzes if you go too fast. Hold the phone upright in front of you."),
+     "About one small step per second, and turn slowly. Fast moves blur the video. The speed meter turns red and the phone buzzes if you go too fast. Hold the phone in front of you with both hands."),
     ("arrow.up.and.down.and.arrow.left.and.right", .blue, "Cover every angle",
      "Film each part of the room more than once: high (toward the ceiling), at eye level, and low (toward the floor). Walk around furniture, look into corners and behind doors, and get close to details you care about."),
     ("square.grid.3x3.fill", .orange, "Turn the red mesh green",
-     "Red parts haven't been captured yet; green parts are. Keep filming red areas from a couple of angles until they turn green. Then tap Save room and walk to the next room without closing the app."),
+     "Red parts haven't been captured yet; green parts are. Keep filming red areas from a couple of angles until they turn green. Tap Finish to review; Resume continues the same room, Save room keeps it. Then walk to the next room without closing the app."),
     ("lightbulb.fill", .yellow, "A few tips",
      "Turn on the lights and open the blinds. Open interior doors. Mirrors, glass and TVs confuse the scanner: film them from an angle. Use the shutter for a full-resolution photo of a spot you want in the tour."),
   ]

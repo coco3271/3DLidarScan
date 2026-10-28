@@ -12,13 +12,13 @@ import os
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def upright(path, size):
-    # sensor-orientation JPEG → upright (EXIF orientation 6 = rotate 90° clockwise), as prepare_photos.py
+    # sensor-orientation JPEG → upright by its EXIF orientation (6 for portrait, 1 or 3 for landscape)
     with Image.open(path) as im:
-        return np.asarray(im.convert('RGB').transpose(Image.Transpose.ROTATE_270).resize(size), dtype=np.float32)
+        return np.asarray(ImageOps.exif_transpose(im).convert('RGB').resize(size), dtype=np.float32)
 
 
 def main():
@@ -32,7 +32,7 @@ def main():
     colorful = lambda a: (np.abs(a[..., 0] - a[..., 1]) + np.abs(a[..., 1] - a[..., 2])) > 12
     # the clean model has one flat color per surface, not the photos' lighting: compare hue only
     # (chromaticity), and allow ties between photos of the same plain wall
-    model = prefix.startswith('model')
+    model = 'model' in prefix
     chroma = lambda a: a / np.maximum(a.sum(-1, keepdims=True), 1) * 255
     diff = np.zeros((len(files), len(files)))
     for i, r in enumerate(renders):

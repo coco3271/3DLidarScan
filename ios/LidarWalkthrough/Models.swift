@@ -14,7 +14,7 @@ import UIKit
 //     rooms/room-N.json      each CapturedRoom as RoomPlan encodes it (+ .usdz, -data.json)
 //     mesh/room-N.ply        LiDAR mesh at the end of room N (world space, classified faces)
 //     photos/photos.json     pose + intrinsics + GPS for every photo
-//     photos/NNNN.jpg        sensor-orientation JPEG, EXIF orientation 6 + EXIF GPS
+//     photos/NNNN.jpg        sensor-orientation JPEG, EXIF orientation (how the phone was held) + EXIF GPS
 //     depth/frames.json      LiDAR depth frames: pose + intrinsics
 //     depth/NNNNN.f16z|conf|jpg  256×192 Float16 meters (raw DEFLATE), confidence, 640×480 RGB
 //
@@ -48,6 +48,9 @@ struct Manifest: Codable {
   /// one video per room with every frame's pose (video/room-N.mov + .json): what Gaussian
   /// splatting trains on
   var videos: [VideoRecord]?
+  /// ARKit's map of the place (worldmap.arworldmap), to continue scanning later in the same
+  /// coordinates
+  var worldMap: String?
 }
 
 /// A room's scan video. Frame i of `file` is entry i of `frames` (a [VideoFrameRecord]).
@@ -124,7 +127,8 @@ struct MeshRecord: Codable {
 }
 
 /// One reference photo. Pixels are the raw camera image in sensor orientation (landscape);
-/// `intrinsics` match those pixels. EXIF orientation 6 makes viewers show it upright.
+/// `intrinsics` match those pixels. The EXIF orientation makes viewers show it upright: 1 when
+/// the phone was held sideways (landscape, how the app scans), 6 when upright (portrait).
 struct PhotoRecord: Codable {
   var file: String
   var room: Int

@@ -75,6 +75,22 @@ Watch the output:
   there, changed wall colors), rerun with `--gen-weight 0.3` or with fewer rounds
   (`--gen-rounds 2`).
 
+## 2b. As a server for the iPhone app ("Process World")
+
+The app can send scans straight to a GPU machine and download the finished World. Run this on
+that machine after step 1:
+
+```sh
+source ~/.venvs/splat/bin/activate
+python3 "$KIT/splat/server.py" --host 0.0.0.0 --port 8787 --token "$(openssl rand -hex 24)"   # note the token
+cloudflared tunnel --url http://localhost:8787    # or Tailscale: gives the phone an https:// address
+```
+
+In the app, open a project › Photoreal World › Processing server, then enter the https address
+and the token, and tap Test connection. Process World uploads the scan, shows the progress, and
+downloads `playcanvas.html`, `splat.html` and `scene.sog`. Jobs run one at a time. Arguments
+after `--` are passed to `make_splat.py`, for example `-- --max-gaussians 2000000`.
+
 ## 3. Without a local Difix
 
 | Fixer | Needs | Notes |

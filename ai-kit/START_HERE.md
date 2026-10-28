@@ -55,8 +55,11 @@ Conventions that matter:
   where the photo was taken.
 - Photo `transform` is camera-to-world, and the camera looks down **−Z**.
   `intrinsics = [fx,0,0, 0,fy,0, cx,cy,1]` describe the raw **landscape** sensor pixels.
-  Project with those and ignore EXIF orientation. To view a photo upright, rotate it 90°
-  clockwise (EXIF orientation 6).
+  Project with those and ignore EXIF orientation. To view a photo upright, apply its EXIF
+  orientation (`ImageOps.exif_transpose` in Pillow). The app scans with the phone held
+  **sideways** (landscape: orientation 1, or 3 when upside down); older scans were held upright
+  (portrait: orientation 6). The same rule follows from the pose: the sensor axis (`transform`
+  column 0 = x or column 1 = y) that points most upward in the world is the image's up.
 - GPS indoors is approximate (see `horizontalAccuracy`, often 5–30 m). Use it to place
   the property on a map and to label photos, never to measure.
 

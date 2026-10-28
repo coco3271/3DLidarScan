@@ -61,6 +61,41 @@ footage. Our app now works the same way.
 On the synthetic test house, training from the video gave **28.6 dB** on held-out views,
 against **24.3 dB** from photos alone, with the same number of steps.
 
+### Capture v3: landscape, finish/resume, process World
+
+- **Landscape only.** The scan screen is landscape. "Start scanning" waits until the phone is
+  held sideways (gravity from CoreMotion, so it works even with the system's rotation lock on).
+  Turning it upright mid-scan pauses the recording, with a big "Turn your iPhone sideways"
+  prompt and a buzz, until it's turned back. In landscape the camera's wide side is horizontal,
+  so each frame sees about 65° across instead of about 50°: more of the room per frame, more
+  overlap between frames, and better splats. Photos carry the EXIF orientation of the hold, and
+  every viewer derives the same upright roll from the pose (a test scan held sideways and
+  upside down checks it).
+- **Finish / Resume.** "Finish" stops recording but keeps ARKit and RoomPlan running, so
+  "Resume scanning" continues the same room, as a new video segment in the same coordinates.
+  "Save room" ends it. Every segment goes into the manifest (`video/room-N.mov`,
+  `room-N-2.mov`, …).
+- **Continue later.** "Finish project" saves ARKit's world map (`worldmap.arworldmap`). On the
+  project screen, "Continue scanning" relocalizes in it ("point at a part you already scanned")
+  before RoomPlan starts, so new or rescanned rooms line up with the old ones. This needs a
+  test on a device: RoomPlan running on a relocalized session is supported by its custom
+  ARSession API, but our use of it is untested.
+- **Process World.** The project screen uploads the scan to a processing server
+  (`ai-kit/splat/server.py` on a GPU machine), shows the steps and queue position, and
+  downloads the World. "View World" opens PlayCanvas's viewer in the app; "Dollhouse & photo
+  compare" opens ours. The job is remembered, so leaving and coming back picks it up again.
+
+**Why not record 1× and 0.5× together?** ARKit owns the camera while it tracks with LiDAR, and
+it streams one camera only: the 1× wide, which is the camera the LiDAR depth and every pose
+are calibrated to. The 0.5× ultra-wide can't record at the same time (AVCaptureMultiCamSession
+can't run alongside an ARSession). Even recorded separately, its frames would have no ARKit pose
+and no matching depth, so they'd need their own pose solve (COLMAP-style) and would add
+distortion and noise at the edges. Landscape gives most of the "more context" benefit, with
+poses and depth that stay exact. For tight spaces such as bathrooms and closets, the real fix
+is more distance and more angles, which the coverage colors already push for. A separate
+ultra-wide pass registered to the scan is possible later, but it's not worth the complexity
+now.
+
 ### Next for capture
 
 - **Live keyframe counter and "angles" coverage.** Today the mesh turns green once a surface

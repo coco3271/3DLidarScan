@@ -179,7 +179,7 @@ console.log('web app (zip opened in the browser)')
 console.log('edge-case bundles')
 for (const [name, expect] of Object.entries({
   'single-room': { colored: 0.5 }, 'no-mesh': { colored: null }, 'no-depth': { colored: 0.3 },
-  'no-photos': { tour: false }, 'ascii-ply': { colored: 0.5 }, 'raw-depth': { colored: 0.5 }, 'flat-zip': { colored: 0.5 },
+  'no-photos': { tour: false }, 'ascii-ply': { colored: 0.5 }, 'raw-depth': { colored: 0.5 }, 'flat-zip': { colored: 0.5 }, 'landscape': { colored: 0.5 },
 })) {
   const { page, errors } = await open('file://' + path.join(out, 'variants', `${name}.html`))
   const ready = await page.evaluate(() => !!window.walkthrough)
@@ -206,6 +206,34 @@ console.log('renders from each photo camera')
   }
   writeFileSync(path.join(out, 'pose-index.json'), JSON.stringify(tour))
   check(errors.length === 0 && tour.length > 0, `${tour.length} photo-camera renders saved`)
+  await page.close()
+}
+
+// ---- 4b. landscape photos: renders from each photo's camera (compare_poses.py landscape-*) -------
+console.log('landscape photos (phone held sideways)')
+for (const [file, prefix, hash] of [
+  [path.join(out, 'variants', 'landscape.html'), 'landscape-', 'ui=0&layers=mesh'],
+  [path.join(out, 'variants', 'landscape-model', 'model.html'), 'landscape-model-', 'ui=0&quality=0'],
+]) {
+  if (!existsSync(file)) continue
+  // 800×600 = the photos' upright 4:3 landscape aspect
+  const { page, errors } = await open('file://' + file + '#' + hash, { width: 800, height: 600 })
+  const n = await page.evaluate(() => (window.walkthrough.tour || window.walkthrough.spec.photos).length)
+  const files = []
+  for (let i = 0; i < n; i++) {
+    await page.evaluate((i) => { location.hash = location.hash.replace(/&?photo=\d+/, '') + '&photo=' + i }, i)
+    await page.waitForFunction((i) => {
+      const w = window.walkthrough, p = (w.tour || w.spec.photos)[i], c = w.camera, t = p.transform
+      return Math.hypot(c.position.x - t[12], c.position.y - t[13], c.position.z - t[14]) < 1e-3
+    }, i, { timeout: 20000 }).catch(() => {})
+    await page.waitForTimeout(250)
+    const up = await page.evaluate(() => new window.walkthrough.camera.up.constructor(0, 1, 0).applyQuaternion(window.walkthrough.camera.quaternion).y)
+    if (i < 2) check(up > 0.8, `${prefix}${i}: camera is upright (up·y = ${up.toFixed(2)})`)
+    await page.screenshot({ path: path.join(out, `${prefix}pose-${i}.png`) })
+    files.push(await page.evaluate((i) => (window.walkthrough.tour || window.walkthrough.spec.photos)[i].file, i))
+  }
+  writeFileSync(path.join(out, `${prefix}pose-index.json`), JSON.stringify(files))
+  check(errors.length === 0 && n > 0, `${prefix}: ${n} renders from landscape photo cameras`)
   await page.close()
 }
 

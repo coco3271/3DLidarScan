@@ -30,7 +30,9 @@ final class MediaWriter: @unchecked Sendable {
   // MARK: photos
 
   /// Render the frame's camera image now; encode + write later. Returns the image size, or nil.
-  func writePhoto(_ pixelBuffer: CVPixelBuffer, to url: URL, maxEdge: CGFloat, geo: GeoSample?) -> CGSize? {
+  /// `orientation`: the EXIF orientation that shows it upright (how the phone was held, see
+  /// exifOrientation(cameraToWorld:))
+  func writePhoto(_ pixelBuffer: CVPixelBuffer, to url: URL, maxEdge: CGFloat, geo: GeoSample?, orientation: Int = 6) -> CGSize? {
     var image = CIImage(cvPixelBuffer: pixelBuffer)
     let longEdge = max(image.extent.width, image.extent.height)
     if longEdge > maxEdge {
@@ -45,7 +47,7 @@ final class MediaWriter: @unchecked Sendable {
       var props: [String: Any] = [
         kCGImageDestinationLossyCompressionQuality as String: 0.92,
         // pixels stay in sensor orientation (that's what the intrinsics describe); viewers rotate
-        kCGImagePropertyOrientation as String: 6,
+        kCGImagePropertyOrientation as String: orientation,
       ]
       if let geo { props[kCGImagePropertyGPSDictionary as String] = Self.gpsDictionary(geo) }
       Self.writeJPEG(cg, to: url, properties: props)

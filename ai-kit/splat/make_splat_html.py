@@ -22,6 +22,15 @@ BUNDLE = os.path.join(HERE, 'viewer', 'spark.bundle.min.js')
 VIEWER = os.path.join(HERE, 'viewer', 'viewer.js')
 
 
+def upright(im, c2w):
+    """Turn a sensor-orientation image upright the way the phone was held (the rule the app
+    uses for EXIF orientation): from which sensor axis points up in the world"""
+    right, up = c2w[1][0], c2w[1][1]
+    if abs(up) >= abs(right):
+        return im if up >= 0 else im.transpose(Image.Transpose.ROTATE_180)
+    return im.transpose(Image.Transpose.ROTATE_270 if right < 0 else Image.Transpose.ROTATE_90)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('splat_out')
@@ -50,7 +59,7 @@ def main():
         src = os.path.join(a.dataset, c['file'])
         if not os.path.exists(src):
             continue
-        im = Image.open(src).convert('RGB').transpose(Image.Transpose.ROTATE_270)  # sensor → upright
+        im = upright(Image.open(src).convert('RGB'), c['transform'])
         im.thumbnail((a.photo_edge, a.photo_edge))
         buf = io.BytesIO()
         im.save(buf, 'JPEG', quality=85)
