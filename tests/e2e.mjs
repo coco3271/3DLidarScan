@@ -328,7 +328,8 @@ if (existsSync(path.join(out, 'splat', 'splat.html'))) {
     // software rendering is slow: wait for the frame that applies the photo camera
     await page.waitForFunction(() => {
       const p = window.walkthrough.photos[0], c = window.walkthrough.camera
-      return Math.hypot(c.position.x - p.transform[0][3], c.position.z - p.transform[2][3]) < 1e-3
+      // all three axes: Walk starts at the same x/z as photo 0, only at eye height
+      return Math.hypot(c.position.x - p.transform[0][3], c.position.y - p.transform[1][3], c.position.z - p.transform[2][3]) < 1e-3
     }, null, { timeout: 20000 }).catch(() => {})
     const t = await page.evaluate(() => {
       const p = window.walkthrough.photos[0], c = window.walkthrough.camera
