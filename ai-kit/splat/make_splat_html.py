@@ -31,11 +31,17 @@ def main():
     ap.add_argument('--photo-edge', type=int, default=1280)
     a = ap.parse_args()
 
-    cams = json.load(open(os.path.join(a.splat_out, 'cameras.json')))
-    scene = next((f for f in ('scene.splat', 'scene.spz', 'scene.ply') if os.path.exists(os.path.join(a.splat_out, f))), None)
+    with open(os.path.join(a.splat_out, 'cameras.json')) as f:
+        cams = json.load(f)
+    # the compact PlayCanvas SOG files when playcanvas.py made them, else the .splat
+    scene = next((f for f in ('scene.sog', 'scene.splat', 'scene.spz', 'scene.ply') if os.path.exists(os.path.join(a.splat_out, f))), None)
     if not scene:
-        sys.exit(f'no scene.splat in {a.splat_out}')
-    files = {scene: open(os.path.join(a.splat_out, scene), 'rb').read()}
+        sys.exit(f'no scene.sog or scene.splat in {a.splat_out}')
+    files = {}
+    for name in (scene, 'dollhouse.sog' if scene == 'scene.sog' else None):
+        if name and os.path.exists(os.path.join(a.splat_out, name)):
+            with open(os.path.join(a.splat_out, name), 'rb') as f:
+                files[name] = f.read()
     # photo stops: the shots the user took on purpose first, else an even spread
     allc = cams['cameras']
     manual = [c for c in allc if c.get('manual')]
@@ -64,7 +70,8 @@ def main():
     html = open(TEMPLATE, encoding='utf-8').read().replace('__TITLE__', html_escape(title))
     with open(out, 'w', encoding='utf-8') as f:
         f.write(html.replace('__DATA__', json.dumps(payload).replace('</', '<\\/')))
-    print(f'{out}: {os.path.getsize(out) / 1e6:.1f} MB · {len(files[scene]) // 32 if scene.endswith(".splat") else "?"} splats · '
+    n = len(files[scene]) // 32 if scene.endswith('.splat') else cams.get('splats', '?')
+    print(f'{out}: {os.path.getsize(out) / 1e6:.1f} MB · {scene} · {n} splats · '
           f'{len(cams["cameras"])} photo stops')
 
 

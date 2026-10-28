@@ -6,7 +6,9 @@ usage: make_splat.py <scan.zip | bundle folder> [-o splat-work] [--fixer difix|f
 
   1. export_dataset.py   scan → images, cameras, LiDAR depth, starting point cloud
   2. train.py            reconstruction, then generative repair rounds (--fixer)
-  3. make_splat_html.py  → splat-work/splat.html (one offline file)
+  3. playcanvas.py       PlayCanvas outputs: scene.sog (compact), playcanvas.html (PlayCanvas's own
+                         viewer with room annotations and a walkthrough tour); needs Node.js
+  4. make_splat_html.py  → splat-work/splat.html (our viewer: dollhouse, walk, photo compare)
 
 Quality presets (on an NVIDIA GPU with gsplat; CPU/Mac use the slow reference renderer):
   preview    7k steps, images at 1/4 size     ~5 min GPU   (CPU: hours for a real house)
@@ -15,6 +17,7 @@ Quality presets (on an NVIDIA GPU with gsplat; CPU/Mac use the slow reference re
 """
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 
@@ -37,6 +40,7 @@ def main():
     ap.add_argument('--downscale', type=float, default=None, help='override the preset')
     ap.add_argument('--device', default='auto')
     ap.add_argument('--eval', action='store_true', help='hold out photos and report PSNR')
+    ap.add_argument('--no-playcanvas', action='store_true', help="skip scene.sog / playcanvas.html (they need Node.js)")
     a, extra = ap.parse_known_args()
     steps, down = PRESETS[a.quality]
     steps, down = a.steps or steps, a.downscale or down
@@ -44,8 +48,14 @@ def main():
     run([os.path.join(HERE, 'export_dataset.py'), a.bundle, '-o', ds])
     run([os.path.join(HERE, 'train.py'), ds, '-o', out, '--steps', str(steps), '--downscale', str(down),
          '--fixer', a.fixer, '--device', a.device] + (['--eval'] if a.eval else []) + extra)
+    if not a.no_playcanvas:
+        sys.path.insert(0, HERE)
+        import playcanvas
+        if playcanvas.make(out, a.bundle) and os.path.exists(os.path.join(out, 'playcanvas.html')):
+            shutil.copy(os.path.join(out, 'playcanvas.html'), os.path.join(a.out, 'playcanvas.html'))
     run([os.path.join(HERE, 'make_splat_html.py'), out, '--dataset', ds, '-o', os.path.join(a.out, 'splat.html')])
-    print(f'\nopen {os.path.join(a.out, "splat.html")}')
+    print(f'\nopen {os.path.join(a.out, "splat.html")}' + (f'  (or {os.path.join(a.out, "playcanvas.html")})'
+                                                          if os.path.exists(os.path.join(a.out, 'playcanvas.html')) else ''))
 
 
 if __name__ == '__main__':

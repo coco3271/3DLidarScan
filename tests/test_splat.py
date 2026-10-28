@@ -8,9 +8,11 @@ Needs torch (CPU is fine); skipped by run.sh when torch isn't installed.
 import base64
 import io
 import json
+import math
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -24,7 +26,8 @@ sys.path.insert(0, HERE)
 import gaussians as G  # noqa: E402
 import fixers  # noqa: E402
 from export_dataset import read_ply_points  # noqa: E402
-from make_fake_bundle import trace  # noqa: E402
+from make_fake_bundle import render, trace  # noqa: E402
+from export_dataset import select_keyframes  # noqa: E402
 
 OUT = sys.argv.pop(1) if len(sys.argv) > 1 else os.path.join(HERE, 'out')
 DS = os.path.join(OUT, 'dataset')
@@ -66,10 +69,50 @@ class Dataset(unittest.TestCase):
         self.assertGreater(len(xyz), 10000)
         self.assertGreater(rgb.std(), 20, 'points are colored from the photos')
 
+    def test_video_keyframes_are_the_frames_their_poses_describe(self):
+        """Re-render the synthetic house from each video keyframe's camera: it must match the
+        decoded image (a wrong frame index, rotation or intrinsics would not)"""
+        video = [f for f in TF['frames'] if f.get('kind') == 'video']
+        self.assertGreater(len(video), 60, 'the training images come from the video')
+        for f in video[::9]:
+            img = np.asarray(Image.open(os.path.join(DS, f['file_path'])).convert('RGB'), dtype=np.float64)
+            c2w = M2W @ np.array(f['transform_matrix'])
+            _, want = render(c2w, f['w'], f['h'], f['fl_x'], f['fl_y'], f['cx'], f['cy'])
+            err = np.abs(img - want).mean()
+            self.assertLess(err, 6, f'{f["source"]}: mean error {err:.1f}')
+
+    def test_blurry_and_badly_tracked_video_frames_are_skipped(self):
+        bad = set()
+        for v in load(os.path.join(OUT, 'FakeHouse', 'manifest.json'))['videos']:
+            for r in load(os.path.join(OUT, 'FakeHouse', v['frames'])):
+                if r['blurPixels'] > 6 or r['tracking'] != 'normal':
+                    bad.add(f'{v["file"]}#{r["index"]}')
+        used = {f['source'] for f in TF['frames']}
+        self.assertTrue(bad)
+        self.assertFalse(bad & used)
+
+    def test_keyframe_selection(self):
+        def rec(i, x, yaw=0.0, blur=1.0, tracking='normal'):
+            c, s_ = math.cos(yaw), math.sin(yaw)
+            T = np.array([[c, 0, s_, x], [0, 1, 0, 1.5], [-s_, 0, c, 0], [0, 0, 0, 1.0]])
+            return {'index': i, 'time': i / 30, 'transform': T.T.ravel().tolist(), 'blurPixels': blur, 'tracking': tracking}
+        # walking 1 cm per frame: a keyframe every ~12 cm, the sharpest of the next 0.3 s
+        recs = [rec(i, i * 0.01, blur=5 if i % 3 else 1) for i in range(120)]
+        sel = select_keyframes(recs)
+        self.assertTrue(8 <= len(sel) <= 12, len(sel))
+        self.assertTrue(all(r['blurPixels'] == 1 for r in sel))
+        # turning in place also makes keyframes; blurry or limited-tracking frames never do
+        turn = [rec(i, 0, yaw=i * 0.02) for i in range(60)] + [rec(60, 0, yaw=2, blur=20), rec(61, 0, yaw=3, tracking='limited')]
+        sel = select_keyframes(turn)
+        self.assertTrue(7 <= len(sel) <= 11, len(sel))
+        self.assertNotIn(60, [r['index'] for r in sel])
+        self.assertNotIn(61, [r['index'] for r in sel])
+        self.assertEqual(len(select_keyframes(recs, max_frames=4)), 4)
+
     def test_images_have_no_exif_rotation(self):
-        im = Image.open(os.path.join(DS, TF['frames'][0]['file_path']))
-        self.assertNotEqual(im.getexif().get(0x0112), 6)
-        self.assertEqual(im.size, (TF['frames'][0]['w'], TF['frames'][0]['h']))
+        with Image.open(os.path.join(DS, TF['frames'][0]['file_path'])) as im:
+            self.assertNotEqual(im.getexif().get(0x0112), 6)
+            self.assertEqual(im.size, (TF['frames'][0]['w'], TF['frames'][0]['h']))
 
 
 class Renderer(unittest.TestCase):
@@ -145,6 +188,49 @@ class Training(unittest.TestCase):
         self.assertEqual(cams[0]['transform'], TF['frames'][0]['transform_matrix'])
 
 
+class PlayCanvas(unittest.TestCase):
+    def test_sog_files_and_cut_dollhouse(self):
+        import zipfile
+        sys.path.insert(0, SPLAT)
+        import playcanvas
+        for name in ('scene.sog', 'dollhouse.sog'):
+            path = os.path.join(RUN, name)
+            self.assertTrue(zipfile.is_zipfile(path), name)
+            with zipfile.ZipFile(path) as z:
+                meta = json.loads(z.read('meta.json'))
+            self.assertIn('count', json.dumps(meta))
+        cams = load(os.path.join(RUN, 'cameras.json'))
+        _, y, _, _ = playcanvas.ply_heights(os.path.join(RUN, 'scene.ply'))
+        self.assertEqual(cams['splats'], len(y))
+        self.assertTrue(1.2 <= cams['dollhouse_cut'] < 2.6, cams['dollhouse_cut'])
+        # the cut keeps the floor and walls, drops the ceiling
+        with tempfile.TemporaryDirectory() as d:
+            n = playcanvas.cut_ply(os.path.join(RUN, 'scene.ply'), os.path.join(d, 'low.ply'), cams['dollhouse_cut'])
+            _, low, _, _ = playcanvas.ply_heights(os.path.join(d, 'low.ply'))
+        self.assertEqual(n, (y < cams['dollhouse_cut']).sum())
+        self.assertLess(low.max(), cams['dollhouse_cut'])
+        self.assertTrue(0.4 * len(y) < n < len(y))
+
+    def test_viewer_settings(self):
+        sys.path.insert(0, SPLAT)
+        import playcanvas
+        cams = load(os.path.join(RUN, 'cameras.json'))
+        rooms = playcanvas.rooms_from_bundle(os.path.join(OUT, 'FakeHouse.zip'))
+        self.assertEqual([r['name'] for r in rooms], ['Living room', 'Bedroom'])
+        st = playcanvas.settings(cams['cameras'], rooms, cams['bounds'])
+        self.assertEqual(st['version'], 2)
+        self.assertEqual([a['title'] for a in st['annotations']], ['Living room', 'Bedroom'])
+        self.assertIn('20.0 m²', st['annotations'][0]['text'])
+        cam = st['cameras'][0]['initial']
+        self.assertGreater(cam['position'][1], 3, 'starts above the house')
+        track = st['animTracks'][0]['keyframes']
+        n = len(track['times'])
+        self.assertGreater(n, 5)
+        self.assertEqual(len(track['values']['position']), 3 * n)
+        self.assertEqual(track['times'], sorted(track['times']))
+        self.assertTrue(all(abs(v - 1.6) < 1e-6 for v in track['values']['position'][1::3]), 'eye height')
+
+
 class Fixers(unittest.TestCase):
     def test_classic_fills_only_the_holes(self):
         img = np.zeros((40, 60, 3), np.uint8)
@@ -176,7 +262,11 @@ class Html(unittest.TestCase):
         start = html.index('<script id="data" type="application/json">') + len('<script id="data" type="application/json">')
         data = json.loads(html[start:html.index('</script>', start)])
         self.assertEqual(data['entry'], 'startSplat')
-        self.assertIn('scene.splat', data['files'])
+        # the compact PlayCanvas files when Node.js made them, else the .splat
+        if os.path.exists(os.path.join(RUN, 'scene.sog')):
+            self.assertEqual(sorted(k for k in data['files'] if k.endswith('.sog')), ['dollhouse.sog', 'scene.sog'])
+        else:
+            self.assertTrue('scene.splat' in data['files'], 'scene embedded')
         cams = json.loads(base64.b64decode(data['files']['cameras.json']))['cameras']
         self.assertTrue(cams)
         for c in cams:

@@ -45,6 +45,8 @@ if "$TP" -c "import torch" 2>/dev/null; then
   python3 ai-kit/splat/export_dataset.py "$OUT/FakeHouse.zip" -o "$OUT/dataset"
   "$TP" ai-kit/splat/train.py "$OUT/dataset" -o "$OUT/splat" --steps 600 --downscale 2 --init-points 15000 \
     --sh-degree 1 --eval --fixer classic --gen-rounds 2 --gen-views 6 | grep -v '^  step [0-9]*/'
+  # PlayCanvas outputs (scene.sog, dollhouse.sog, playcanvas.html) via npx splat-transform
+  python3 ai-kit/splat/playcanvas.py "$OUT/splat" --bundle "$OUT/FakeHouse.zip"
   python3 ai-kit/splat/make_splat_html.py "$OUT/splat" --dataset "$OUT/dataset"
   "$TP" tests/test_splat.py "$OUT"
 else

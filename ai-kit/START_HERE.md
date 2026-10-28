@@ -6,7 +6,8 @@ GPS). It uses the `house-capture/5` bundle format of
 `scan-to-threejs` workflow applies. A copy of the skill and its scripts is in
 `_ai/scan-to-threejs/` (MIT, see its LICENSE).
 
-**Goal:** give the user a clean, measured 3D model of the property that they can open in a
+**Goal:** give the user a photoreal Gaussian-splat walkthrough rebuilt from the scan video
+(step 2b) when you have an NVIDIA GPU. Otherwise give them a clean, measured 3D model of the property that they can open in a
 browser: the "architectural dollhouse" look (thick cut-away walls, framed doors and windows,
 real floor materials, furniture in its place, soft shadows, on a dark blueprint grid), with
 first-person walking between rooms and a tour of the photo spots. Be accurate to the
@@ -32,6 +33,7 @@ spaces, so quote paths.
 | `photos/photos.json` + `photos/NNNN.jpg` | Posed photos. `manual: true` marks the high-resolution shots the user took at each spot (the tour stops). Each has `location` (lat/lon, accuracy in m, compass `heading`) |
 | `depth/frames.json` + `depth/NNNNN.{f16z,conf,jpg}` | LiDAR depth frames: 256×192 Float16 meters stored as raw DEFLATE (`zlib.decompress(raw, -15)`), confidence 0–2, and 640×480 RGB, each with its pose |
 | `walkthrough.html` | A ready-made walkthrough built on the phone (see step 2) |
+| `video/room-N.mov` + `video/room-N.json` | **The scan video of each room** (HEVC or H.264, sensor orientation: landscape, the orientation the intrinsics describe; don't apply rotation). The `.json` has one entry per video frame, in order: `time` in the video, ARKit `timestamp` (pairs it with depth frames), camera-to-world `transform`, `intrinsics` for the video's pixels, `tracking`, and `blurPixels` (predicted motion smear; skip frames above ~6). This is what the photoreal Gaussian-splat walkthrough trains on (step 2b). |
 | `poses.csv` | One row per photo and depth frame: **where the phone was** (`x,y,z` in meters), **which way it pointed** (`dir_x,dir_y,dir_z`, `yaw_deg`, `pitch_deg`), and the paired photo ↔ LiDAR file, plus GPS |
 
 Conventions that matter:
@@ -71,6 +73,34 @@ photo spots, and Dollhouse, Walk (WASD or an on-screen joystick) and Photo tour 
 Give the user this file first, as the quick result while you build the clean model in
 step 3. It works on phones and desktops, needs no server and has no dependencies. If the zip already has `walkthrough.html` from the phone, you can
 hand that over as-is, or regenerate it.
+
+## 2b. The photoreal walkthrough: Gaussian splats from the video
+
+Gaussian splats rebuild the room from the scan video itself, so it looks like the video:
+every texture, reflection and object. They are more faithful than any modeled scene, and the
+best result when the user wants it to look real.
+
+```sh
+python3 _ai/splat/make_splat.py . -o splat-work --fixer difix   # → splat-work/splat.html + playcanvas.html
+```
+
+The pipeline:
+1. Picks sharp keyframes from the video using the per-frame poses, skipping blurry frames.
+2. Pairs each keyframe with LiDAR depth from the same moment.
+3. Trains the splats, then repairs thin areas with generative AI.
+4. Writes `splat.html`: dollhouse with the ceiling cut away, walk, and photo compare.
+5. Writes the PlayCanvas files: `scene.sog`, and `playcanvas.html` with room annotations and a
+   walkthrough tour.
+
+Requirements:
+- **An NVIDIA GPU** for a whole house, roughly 20–40 minutes.
+- **Python:** `pip install numpy pillow torch gsplat`, plus the Difix3D repo for `--fixer difix`.
+- **ffmpeg** to read the video.
+- **Node.js** for the PlayCanvas files.
+
+Full instructions are in `BUILD_SPLAT.md` in the app's repository. If you're in a chat
+sandbox without a GPU, don't try to train a whole house on the CPU. Build the clean model
+(step 3) and tell the user the photoreal version needs a GPU machine.
 
 ## 3. The clean model: `make_model.py`, then refine `model.json`
 

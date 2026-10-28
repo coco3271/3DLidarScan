@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreLocation
 import CoreVideo
 import ImageIO
@@ -353,5 +354,81 @@ final class LidarWalkthroughTests: XCTestCase {
     let captured = Float(scores.filter { $0 >= CoverageMap.goodScore }.count) / Float(count)
     XCTAssertEqual(seen, 0.54, accuracy: 0.05)
     XCTAssertEqual(captured, 0.22, accuracy: 0.05)
+  }
+
+  // MARK: video capture
+
+  func testMotionMonitorFlagsFastMovesWithHysteresis() {
+    var m = MotionMonitor()
+    let fx: Float = 1440
+    // a slow walk: 0.35 m/s, no turning, 1/60 s exposures → good
+    for i in 0..<30 {
+      m.add(time: Double(i) / 30, pose: pose([0.35 * Float(i) / 30, 1.5, 0], yaw: 0, pitch: 0), exposure: 1.0 / 60, fx1920: fx)
+    }
+    XCTAssertEqual(m.level, .good)
+    XCTAssertEqual(m.speed, 0.35, accuracy: 0.02)
+    // a quick pan: 90°/s → too fast
+    for i in 30..<60 {
+      m.add(time: Double(i) / 30, pose: pose([0.35, 1.5, 0], yaw: Float(i - 30) / 30 * .pi / 2, pitch: 0), exposure: 1.0 / 60, fx1920: fx)
+    }
+    XCTAssertEqual(m.level, .tooFast)
+    XCTAssertGreaterThan(m.meter, 1)
+    // hysteresis: just under the limit stays "too fast", well under it clears
+    XCTAssertEqual(MotionMonitor.classify(speed: 0.85, turnRate: 0, blur: 0, previous: .tooFast), .tooFast)
+    XCTAssertEqual(MotionMonitor.classify(speed: 0.85, turnRate: 0, blur: 0, previous: .good), .fast)
+    XCTAssertEqual(MotionMonitor.classify(speed: 0.3, turnRate: 0.2, blur: 2, previous: .tooFast), .good)
+    // a pause in recording isn't motion
+    var p = MotionMonitor()
+    p.add(time: 0, pose: pose([0, 1.5, 0], yaw: 0, pitch: 0), exposure: 0.01, fx1920: fx)
+    p.add(time: 5, pose: pose([3, 1.5, 0], yaw: 0, pitch: 0), exposure: 0.01, fx1920: fx)
+    XCTAssertEqual(p.level, .good)
+  }
+
+  func testVideoRecorderWritesFramesAndTheirPoses() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir.appendingPathComponent("video"), withIntermediateDirectories: true)
+    addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+    let rec = VideoRecorder(url: dir.appendingPathComponent("video/room-0.mov"), room: 0)
+    let k = simd_float3x3([300, 0, 0], [0, 300, 0], [160, 120, 1])
+    var written = 0
+    for i in 0..<45 {
+      var buffer: CVPixelBuffer?
+      CVPixelBufferCreate(nil, 320, 240, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
+      let px = try XCTUnwrap(buffer)
+      CVPixelBufferLockBaseAddress(px, [])
+      memset(CVPixelBufferGetBaseAddress(px), Int32(i * 5), CVPixelBufferGetDataSize(px))
+      CVPixelBufferUnlockBaseAddress(px, [])
+      // 60 fps in: every other frame is due (30 fps out)
+      if rec.append(px, timestamp: 100 + Double(i) / 60, transform: pose([Float(i) * 0.01, 1.5, 0], yaw: 0, pitch: 0),
+                    intrinsics: k, exposure: 1.0 / 60, tracking: "normal", blurPixels: 1) { written += 1 }
+      try await Task.sleep(nanoseconds: 8_000_000)
+    }
+    XCTAssertGreaterThan(written, 15)
+    XCTAssertLessThanOrEqual(written, 23)
+    let finished = await rec.finish(folder: dir)
+    let record = try XCTUnwrap(finished)
+    XCTAssertEqual(record.frameCount, written)
+    XCTAssertEqual(record.width, 320)
+    XCTAssertEqual(record.file, "video/room-0.mov")
+    let frames = try BundleJSON.decoder.decode([VideoFrameRecord].self, from: Data(contentsOf: dir.appendingPathComponent(record.frames)))
+    XCTAssertEqual(frames.count, written)
+    XCTAssertEqual(frames.map(\.index), Array(0..<written))
+    XCTAssertEqual(frames[0].time, 0)
+    XCTAssertEqual(frames[0].timestamp, 100, accuracy: 1e-9)
+    XCTAssertEqual(frames[0].intrinsics, k.columnMajor)
+    // the video has exactly those frames, at those times
+    let asset = AVURLAsset(url: dir.appendingPathComponent(record.file))
+    let tracks = try await asset.loadTracks(withMediaType: .video)
+    let track = try XCTUnwrap(tracks.first)
+    let reader = try AVAssetReader(asset: asset)
+    let out = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    reader.add(out)
+    reader.startReading()
+    var times: [Double] = []
+    while let sample = out.copyNextSampleBuffer() {
+      if CMSampleBufferGetNumSamples(sample) > 0 { times.append(CMSampleBufferGetPresentationTimeStamp(sample).seconds) }
+    }
+    XCTAssertEqual(times.count, written)
+    for (t, f) in zip(times.sorted(), frames) { XCTAssertEqual(t, f.time, accuracy: 0.001) }
   }
 }

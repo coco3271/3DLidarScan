@@ -56,6 +56,10 @@ final class ScanOverlay: NSObject {
     return t
   }
 
+  /// Called on SceneKit's render thread with every new camera frame (~60/s): the video
+  /// recorder's feed. Keep it quick and don't keep the frame.
+  func setFrameHandler(_ handler: (@Sendable (ARFrame) -> Void)?) { state.setFrameHandler(handler) }
+
   /// A photo was saved: what its depth frame saw is now photographed
   func addPhoto(_ depth: DepthSample) {
     let coverage = coverage
@@ -235,6 +239,10 @@ private final class OverlayState: NSObject, ARSCNViewDelegate, @unchecked Sendab
   private var counts: [UUID: (captured: Int, total: Int)] = [:]
   private var lastQueued: [UUID: CFTimeInterval] = [:]
   private var _coloredVersion = -1
+  private var frameHandler: (@Sendable (ARFrame) -> Void)?
+  private var lastFrameTime: TimeInterval = 0
+
+  func setFrameHandler(_ h: (@Sendable (ARFrame) -> Void)?) { lock.withLock { frameHandler = h } }
 
   var coloredVersion: Int {
     get { lock.withLock { _coloredVersion } }
@@ -312,6 +320,14 @@ private final class OverlayState: NSObject, ARSCNViewDelegate, @unchecked Sendab
   /// Don't draw the mesh right in front of the lens: it only blocks the view
   func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
     if let camera = renderer.pointOfView?.camera, camera.zNear != 0.25 { camera.zNear = 0.25 }
+    // hand each new camera frame to the recorder (once: the view can render faster than the camera)
+    guard let frame = (renderer as? ARSCNView)?.session.currentFrame else { return }
+    let handler: (@Sendable (ARFrame) -> Void)? = lock.withLock {
+      guard frame.timestamp != lastFrameTime else { return nil }
+      lastFrameTime = frame.timestamp
+      return frameHandler
+    }
+    handler?(frame)
   }
 
   /// Relocalize after an interruption (a call, the app in the background) instead of a new world

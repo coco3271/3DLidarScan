@@ -1,6 +1,7 @@
-I've attached a LiDAR scan of a property from my iPhone (a zip: Apple RoomPlan rooms, LiDAR mesh, depth frames, and photos with GPS). Please recreate it as a clean 3D model I can walk through, in the "architectural dollhouse" style: thick cut-away walls, framed doors and windows, real floor materials, furniture in its measured place, soft shadows, on a dark blueprint grid.
+I've attached a LiDAR scan of a property from my iPhone (a zip: a video of each room with the camera's position and direction for every frame, LiDAR depth and mesh, Apple RoomPlan rooms, and photos with GPS). Please turn it into a 3D walkthrough of the property.
 
 1. Unzip it and read START_HERE.md (inside the zip) before anything else. It explains the file format and includes the scripts to use.
 2. Run _ai/make_walkthrough.py and give me walkthrough.html right away, as a quick preview of the raw scan.
-3. Run _ai/make_model.py to build the clean model, then refine its model.json from the photos: the real furniture types and colors, the rugs, plants, lamps and decor RoomPlan doesn't detect, and the materials. Compare the model with each photo from that photo's exact camera (model.html#photo=N) and keep fixing until they match. Give me the final model.html.
-4. Tell me each room's size and the total floor area, and which parts are measured vs. approximated.
+3. If you have an NVIDIA GPU: run _ai/splat/make_splat.py to rebuild the rooms from the video as Gaussian splats (photoreal), and give me splat.html and playcanvas.html.
+4. Otherwise (or as well): run _ai/make_model.py to build the clean dollhouse model, then refine its model.json from the photos (real furniture types and colors, the decor RoomPlan doesn't detect, materials), comparing with each photo from its exact camera (model.html#photo=N) until they match. Give me the final model.html.
+5. Tell me each room's size and the total floor area, and which parts are measured vs. approximated.

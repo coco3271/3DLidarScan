@@ -347,6 +347,30 @@ if (existsSync(path.join(out, 'splat', 'splat.html'))) {
   await page.close()
 }
 
+if (existsSync(path.join(out, 'splat', 'playcanvas.html'))) {
+  // PlayCanvas's own viewer (made by splat-transform): loads offline, draws the scene
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+  const errors = []
+  page.on('pageerror', (e) => errors.push(String(e)))
+  page.on('requestfailed', (r) => errors.push('offline? ' + r.url()))
+  await page.goto('file://' + path.join(out, 'splat', 'playcanvas.html'))
+  await page.waitForTimeout(15000)
+  await page.screenshot({ path: path.join(out, 'splat-playcanvas.png') })
+  const drawn = await page.evaluate(() => {
+    const c = [...document.querySelectorAll('canvas')].sort((a, b) => b.width * b.height - a.width * a.height)[0]
+    if (!c) return 0
+    const g = document.createElement('canvas'); g.width = 64; g.height = 40
+    const x = g.getContext('2d'); x.drawImage(c, 0, 0, 64, 40)
+    const d = x.getImageData(0, 0, 64, 40).data
+    let n = 0
+    for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - 11) + Math.abs(d[i + 1] - 22) + Math.abs(d[i + 2] - 38) > 40) n++
+    return n / (64 * 40)
+  })
+  check(errors.length === 0, `playcanvas.html loads offline without errors ${errors.join(' | ')}`)
+  check(drawn > 0.1, `playcanvas.html draws the scene (${Math.round(drawn * 100)}% of the view)`)
+  await page.close()
+}
+
 await browser.close()
 console.log(failures.length ? `\n${failures.length} FAILED:\n- ${failures.join('\n- ')}` : '\nall browser checks passed')
 process.exit(failures.length ? 1 : 0)

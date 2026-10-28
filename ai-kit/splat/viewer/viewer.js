@@ -3,7 +3,8 @@
 //   startSplat(THREE, container, source)   THREE = spark.bundle.min.js (three.js + Spark)
 //   source = { files: string[], read(path) -> ArrayBuffer }
 //
-// Files: scene.splat (model frame: meters, +Y up, floor at y = 0), cameras.json (photo cameras,
+// Files: scene.sog (PlayCanvas SOG) or scene.splat, in the model frame (meters, +Y up, floor at
+// y = 0); dollhouse.sog (optional, the scene without its ceiling); cameras.json (photo cameras,
 // OpenGL camera-to-world) and photos/*.jpg (upright). Modes:
 //   Dollhouse  orbit from above; splats above `cut` (the ceiling, the top of the walls) are left
 //              out so you see into the rooms
@@ -17,9 +18,10 @@ export async function startSplat(THREE, container, source) {
   const ui = buildUI(container)
   const has = new Set(source.files)
   const cams = has.has('cameras.json') ? JSON.parse(new TextDecoder().decode(await source.read('cameras.json'))) : { cameras: [] }
-  const splatFile = ['scene.splat', 'scene.spz', 'scene.ply'].find((f) => has.has(f))
-  if (!splatFile) throw new Error('no scene.splat in this file')
+  const splatFile = ['scene.sog', 'scene.splat', 'scene.spz', 'scene.ply'].find((f) => has.has(f))
+  if (!splatFile) throw new Error('no splat scene in this file')
   const bytes = new Uint8Array(await source.read(splatFile))
+  const typeOf = (f) => ({ sog: 'pcsogszip' })[f.split('.').pop()] || f.split('.').pop()
 
   const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true })
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
@@ -30,16 +32,20 @@ export async function startSplat(THREE, container, source) {
   const spark = new THREE.SparkRenderer({ renderer })
   scene.add(spark)
 
-  const fileType = splatFile.split('.').pop()
+  const fileType = typeOf(splatFile)
   const full = new THREE.SplatMesh({ fileBytes: bytes.slice().buffer, fileType })
   scene.add(full)
-  // the dollhouse: the same splats without the ceiling (.splat records are 32 bytes, y at byte 4)
+  // the dollhouse: the same splats without the ceiling: dollhouse.sog (made by playcanvas.py),
+  // or cut here from a .splat (32-byte records, y at byte 4)
   const params = new URLSearchParams(location.hash.slice(1))
-  let cut = +(params.get('cut') || 0)
+  let cut = +(params.get('cut') || 0) || cams.dollhouse_cut || 0
   let doll = null
-  const stats = splatStats(bytes, fileType)
-  if (!cut && stats) cut = Math.max(1.2, stats.ceiling - 0.45)
-  if (fileType === 'splat') {
+  const stats = splatStats(bytes, fileType) || boundsStats(cams)
+  if (!cut && stats?.ceiling) cut = Math.max(1.2, stats.ceiling - 0.45)
+  if (has.has('dollhouse.sog') && !params.get('cut')) {
+    doll = new THREE.SplatMesh({ fileBytes: await source.read('dollhouse.sog'), fileType: 'pcsogszip' })
+    scene.add(doll)
+  } else if (fileType === 'splat') {
     doll = new THREE.SplatMesh({ fileBytes: filterSplat(bytes, cut).buffer, fileType })
     scene.add(doll)
   }
@@ -149,7 +155,7 @@ export async function startSplat(THREE, container, source) {
   if (!photos.length) ui.modeButtons.find((b) => b.dataset.mode === 'photo').disabled = true
   if (!doll) ui.cut.closest('label').hidden = true
   ui.title.textContent = cams.property || 'Photoreal walkthrough'
-  ui.subtitle.textContent = `${(stats?.count ?? 0).toLocaleString()} splats · ${photos.length} photo spots`
+  ui.subtitle.textContent = `${(stats?.count ?? cams.splats ?? 0).toLocaleString()} splats · ${photos.length} photo spots`
 
   function applyHash() {
     const q = new URLSearchParams(location.hash.slice(1))
@@ -211,6 +217,17 @@ function splatStats(bytes, type) {
     count: n, ceiling: q(ys, 0.985),
     box: { getCenter: (v) => v.set((box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, (box.min[2] + box.max[2]) / 2),
            getSize: (v) => v.set(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) },
+  }
+}
+
+/** extent from cameras.json's bounds (written by playcanvas.py with the .sog files) */
+function boundsStats(cams) {
+  const b = cams.bounds
+  if (!b) return null
+  return {
+    count: cams.splats, ceiling: b[1][1],
+    box: { getCenter: (v) => v.set((b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2, (b[0][2] + b[1][2]) / 2),
+           getSize: (v) => v.set(b[1][0] - b[0][0], b[1][1] - b[0][1], b[1][2] - b[0][2]) },
   }
 }
 

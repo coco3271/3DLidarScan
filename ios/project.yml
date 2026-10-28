@@ -33,7 +33,7 @@ targets:
       path: LidarWalkthrough/Info.plist
       properties:
         CFBundleDisplayName: 3D LiDAR Scan
-        NSCameraUsageDescription: The camera and LiDAR scanner measure each room and take the reference photos for your 3D walkthrough.
+        NSCameraUsageDescription: The camera and LiDAR scanner film and measure each room for your 3D walkthrough.
         NSLocationWhenInUseUsageDescription: Your location tags the property and each photo so the walkthrough knows where it was taken.
         UIRequiredDeviceCapabilities: [arkit]
         UIFileSharingEnabled: true
@@ -56,6 +56,8 @@ targets:
       - path: LidarWalkthrough/MediaWriter.swift
       - path: LidarWalkthrough/MeshExporter.swift
       - path: LidarWalkthrough/CoverageMap.swift
+      - path: LidarWalkthrough/Motion.swift
+      - path: LidarWalkthrough/VideoRecorder.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.coco3271.lidarwalkthrough.tests

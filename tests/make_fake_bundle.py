@@ -12,6 +12,7 @@ import math
 import os
 import shutil
 import struct
+import subprocess
 import uuid
 import zlib
 
@@ -198,6 +199,58 @@ def write_ply(path, rooms):
     return len(verts), len(faces)
 
 
+def write_depth(out, frames, T, room, ts, PW, PF, DW, DH):
+    """One LiDAR depth frame (+ its 320-wide RGB), appended to `frames`; returns its name"""
+    k = DW / PW
+    depth, _ = render(T, DW, DH, PF * k, PF * k, DW / 2, DH / 2)
+    name = f'{len(frames):05d}'
+    open(os.path.join(out, f'depth/{name}.f16z'), 'wb').write(zlib.compress(depth.astype('<f2').tobytes(), 6)[2:-4])
+    open(os.path.join(out, f'depth/{name}.conf'), 'wb').write(np.full(DW * DH, 2, np.uint8).tobytes())
+    _, rgb640 = render(T, 320, 240, PF * 320 / PW, PF * 320 / PW, 160, 120)
+    Image.fromarray(rgb640).save(os.path.join(out, f'depth/{name}.jpg'), quality=85)
+    frames.append({'file': f'depth/{name}.f16z', 'confidence': f'depth/{name}.conf', 'rgb': f'depth/{name}.jpg',
+                   'rgbIntrinsics': [PF * 320 / PW, 0, 0, 0, PF * 320 / PW, 0, 160, 120, 1], 'room': room, 'timestamp': ts,
+                   'width': DW, 'height': DH, 'transform': col_major(T),
+                   'intrinsics': [PF * k, 0, 0, 0, PF * k, 0, DW / 2, DH / 2, 1]})
+    return name
+
+
+def make_videos(out, w, h, f, t_start, depth_frames, depth_size, fps=10):
+    """One scan video per room, like the app's video/room-N.mov + .json: a slow loop around the
+    room looking at the walls, high and low. A few frames are marked blurry or with poor tracking,
+    which the pipeline must skip. Like the app, LiDAR depth is recorded alongside (every 4th frame)."""
+    os.makedirs(os.path.join(out, 'video'), exist_ok=True)
+    records = []
+    t = t_start
+    for ri, (r, n) in enumerate(zip(ROOMS, (72, 48))):
+        cx, cz = (r['x0'] + r['x1']) / 2, (r['z0'] + r['z1']) / 2
+        rad = min(r['x1'] - r['x0'], r['z1'] - r['z0']) / 2 - 0.9
+        name = f'video/room-{ri}'
+        enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h}', '-r', str(fps),
+                                '-i', '-', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '14', '-g', '10', '-bf', '0',
+                                os.path.join(out, name + '.mov')], stdin=subprocess.PIPE)
+        frames = []
+        for i in range(n):
+            a = 2 * math.pi * i / n
+            pos = (cx + rad * math.cos(a), FLOOR + 1.45 + 0.15 * math.sin(3 * a), cz + rad * math.sin(a))
+            T = camera_pose(pos, a + 0.5 * math.sin(2 * a), pitch=0.35 * math.sin(4 * a))
+            _, img = render(T, w, h, f, f, w / 2, h / 2)
+            enc.stdin.write(np.ascontiguousarray(img).tobytes())
+            if i % 4 == 0:
+                write_depth(out, depth_frames, T, ri, t + i / fps, w, f, *depth_size)
+            blur = 12.0 if i % 17 == 5 else 1.5
+            frames.append({'index': i, 'time': i / fps, 'timestamp': t + i / fps, 'transform': col_major(T),
+                           'intrinsics': [f, 0, 0, 0, f, 0, w / 2, h / 2, 1], 'exposure': 1 / 60,
+                           'tracking': 'limited:excessiveMotion' if i == n - 3 else 'normal', 'blurPixels': blur, 'pose': pose_of(T)})
+        enc.stdin.close()
+        enc.wait()
+        json.dump(frames, open(os.path.join(out, name + '.json'), 'w'))
+        records.append({'room': ri, 'file': name + '.mov', 'frames': name + '.json', 'width': w, 'height': h, 'codec': 'h264',
+                        'frameCount': n, 'duration': (n - 1) / fps, 'fps': fps, 'dropped': 0})
+        t += n / fps + 5
+    return records
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('out')
@@ -226,18 +279,7 @@ def main():
     for i, (room, p, yaw) in enumerate(stops):
         T = camera_pose(p, yaw + 0.1 * i, pitch=-0.15 if i % 2 else 0.1)
         ts = t0 + i * 0.7
-        # depth frame
-        k = DW / PW
-        depth, rgb = render(T, DW, DH, PF * k, PF * k, DW / 2, DH / 2)
-        name = f'{len(frames):05d}'
-        open(os.path.join(out, f'depth/{name}.f16z'), 'wb').write(zlib.compress(depth.astype('<f2').tobytes(), 6)[2:-4])
-        open(os.path.join(out, f'depth/{name}.conf'), 'wb').write(np.full(DW * DH, 2, np.uint8).tobytes())
-        _, rgb640 = render(T, 320, 240, PF * 320 / PW, PF * 320 / PW, 160, 120)
-        Image.fromarray(rgb640).save(os.path.join(out, f'depth/{name}.jpg'), quality=85)
-        frames.append({'file': f'depth/{name}.f16z', 'confidence': f'depth/{name}.conf', 'rgb': f'depth/{name}.jpg',
-                       'rgbIntrinsics': [PF * 320 / PW, 0, 0, 0, PF * 320 / PW, 0, 160, 120, 1], 'room': room, 'timestamp': ts,
-                       'width': DW, 'height': DH, 'transform': col_major(T),
-                       'intrinsics': [PF * k, 0, 0, 0, PF * k, 0, DW / 2, DH / 2, 1]})
+        name = write_depth(out, frames, T, room, ts, PW, PF, DW, DH)
         if i % 4 == 0:
             _, img = render(T, PW, PH, PF, PF, PW / 2, PH / 2)
             fname = f'photos/{len(photos):04d}.jpg'
@@ -249,8 +291,12 @@ def main():
                            'capturedAt': '2026-10-23T15:00:00Z', 'depthFrame': f'depth/{name}.f16z', 'pose': pose_of(T),
                            'location': {'latitude': 45.50169 + i * 1e-6, 'longitude': -73.56725, 'altitude': 30.0,
                                         'horizontalAccuracy': 8.0, 'verticalAccuracy': 4.0, 'heading': (math.degrees(yaw) % 360), 'headingAccuracy': 15.0}})
+    videos = make_videos(out, PW, PH, PF, t0 + 100, frames, (DW, DH)) if shutil.which('ffmpeg') else []
+    if not videos:
+        print('note: ffmpeg not found, so the fake scan has no video')
     json.dump(photos, open(os.path.join(out, 'photos/photos.json'), 'w'), indent=1)
     json.dump(frames, open(os.path.join(out, 'depth/frames.json'), 'w'))
+
 
     nv, nf = 0, 0
     for idx, r in enumerate(room_files):
@@ -270,6 +316,8 @@ def main():
                      'altitude': 30.0, 'horizontalAccuracy': 8.0},
         'app': {'name': '3D LiDAR Scan', 'version': 'test'},
     }
+    if videos:
+        manifest['videos'] = videos
     json.dump(manifest, open(os.path.join(out, 'manifest.json'), 'w'), indent=1)
     print(f'{out}: {len(photos)} photos, {len(frames)} depth frames, mesh {nv} verts / {nf} faces')
     if a.zip:

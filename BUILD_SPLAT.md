@@ -35,6 +35,9 @@ KIT=~/3DLidarScan/ai-kit
 
 python3 -m venv ~/.venvs/splat && source ~/.venvs/splat/bin/activate
 pip install -q numpy pillow torch
+# ffmpeg reads the scan video; Node.js makes the PlayCanvas files (npx fetches splat-transform)
+command -v ffmpeg || sudo apt-get install -y ffmpeg      # macOS: brew install ffmpeg
+command -v npx || sudo apt-get install -y nodejs npm     # macOS: brew install node
 # CUDA only: the fast renderer and the generative fixer
 pip install -q gsplat                     # compiles its CUDA kernels on first use (needs nvcc); prebuilt
                                           # wheels: https://docs.gsplat.studio/whl/ (match torch + CUDA)
@@ -53,11 +56,16 @@ source ~/.venvs/splat/bin/activate
 python3 "$KIT/splat/make_splat.py" "<scan.zip>" -o "<work folder>" --fixer difix --quality standard --eval
 ```
 
-This runs three steps:
-1. `export_dataset.py`: images, cameras, LiDAR depth and the point cloud, written to
-   `<work>/dataset`.
+This runs four steps:
+1. `export_dataset.py`: picks sharp keyframes from each room's **video** (using the per-frame
+   poses), with LiDAR depth from the same moments and the point cloud, written to
+   `<work>/dataset`. It prints how many frames it skipped as blurry or badly tracked. If most of
+   a room was skipped, tell the user to rescan it more slowly. Scans from older app versions
+   (photos, no video) work too.
 2. `train.py`: reconstruction, then 3 generative repair rounds, written to `<work>/scene`.
-3. `make_splat_html.py`: writes `<work>/splat.html`.
+3. `playcanvas.py`: the PlayCanvas files, `scene.sog` (compact) and `playcanvas.html`
+   (PlayCanvas's viewer, with room annotations and a walkthrough tour).
+4. `make_splat_html.py`: writes `<work>/splat.html`.
 
 Watch the output:
 - The held-out PSNR printed at the end should be **above ~22 dB** on a real house. Below
@@ -88,8 +96,10 @@ open "<work folder>/splat.html"        # or copy it to the user's machine
 - Walk: it stays inside the rooms, without fog in front of the walls.
 - Photos: each view matches its photo. Drag the Compare slider to check.
 
-Give the user `splat.html`: one offline file that opens in any browser, phones included.
-Tell them:
+Give the user `splat.html` and `playcanvas.html`. Each is one offline file that opens in any
+browser, phones included. To clean up or edit the scene, they can drop `<work>/scene/scene.sog`
+(or `scene.ply`) into SuperSplat (https://superspl.at/editor), PlayCanvas's free editor, and
+publish from there. Tell them:
 - what was reconstructed from their photos
 - what was repaired by generative AI (the `previews/gen-*.jpg` show which views)
 - that `<work>/scene/scene.ply` is the standard 3DGS file for other viewers (SuperSplat,

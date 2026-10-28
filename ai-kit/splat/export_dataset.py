@@ -3,7 +3,11 @@
 dataset in the nerfstudio layout, which every common splat trainer reads: our train.py,
 nerfstudio's splatfacto, gsplat's examples, Brush and OpenSplat (both run on a Mac).
 
-usage: export_dataset.py <bundle-folder-or-zip> [-o dataset] [--max-edge 1920] [--frames all|photos]
+usage: export_dataset.py <bundle-folder-or-zip> [-o dataset] [--max-edge 1920] [--frames auto|video|all|photos]
+
+The training images come from the room videos the app records (video/room-N.mov + per-frame
+poses): sharp keyframes every ~12 cm or ~7°, skipping frames the phone moved too fast for.
+Scans from older app versions (photos only) work too. Reading video needs ffmpeg.
 
 Writes:
   transforms.json     cameras: per-frame intrinsics + camera-to-world (OpenGL: x right, y up,
@@ -21,8 +25,12 @@ Needs numpy and Pillow.
 import argparse
 import io
 import json
+import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import zlib
 
 import numpy as np
@@ -125,8 +133,71 @@ def read_ply_points(path):
     rec = np.frombuffer(data[end:], dtype=[('p', '<f4', 3), ('n', '<f4', 3), ('c', 'u1', 3)], count=n)
     return rec['p'].astype(np.float64), rec['c'].copy()
 
+MAX_BLUR = 6.0  # predicted smear (px at 1920 wide) above which a video frame is skipped
 
-def export(src, out, max_edge=1920, frames='all', voxel=0.02, max_points=500_000, depth_size=256):
+
+def select_keyframes(recs, move=0.12, turn=0.12, window=0.3, max_blur=MAX_BLUR, max_frames=600):
+    """Pick training frames from a video's per-frame poses: a new one each time the phone has
+    moved ~12 cm or turned ~7°, taking the sharpest frame (least predicted blur) in the next
+    0.3 s; frames with poor tracking or too much blur never count."""
+    ok = [r for r in recs if r.get('tracking', 'normal') == 'normal' and r.get('blurPixels', 0) <= max_blur]
+    sel, last, i = [], None, 0
+    while i < len(ok):
+        r = ok[i]
+        if last is not None:
+            a, b2 = mat(r['transform']), mat(last['transform'])
+            d = np.linalg.norm(a[:3, 3] - b2[:3, 3])
+            t = math.acos(max(-1.0, min(1.0, float(a[:3, 2] @ b2[:3, 2]))))
+            if d < move and t < turn:
+                i += 1
+                continue
+        j, best = i, i
+        while j < len(ok) and ok[j]['time'] - r['time'] <= window:
+            if ok[j].get('blurPixels', 0) < ok[best].get('blurPixels', 0):
+                best = j
+            j += 1
+        sel.append(ok[best])
+        last = ok[best]
+        i = best + 1
+    if len(sel) > max_frames:
+        step = len(sel) / max_frames
+        sel = [sel[int(k * step)] for k in range(max_frames)]
+    return sel
+
+
+def decode_frames(b, video, indices):
+    """Yield (frame index, RGB array) for the wanted frames, decoding the video once with ffmpeg"""
+    if not shutil.which('ffmpeg'):
+        sys.exit('ffmpeg is needed to read the scan video (macOS: brew install ffmpeg; Linux: apt install ffmpeg)')
+    wanted = set(indices)
+    w, h = video['width'], video['height']
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, os.path.basename(video['file']))
+        with open(path, 'wb') as f:  # ffmpeg needs a seekable file (.mov keeps its index at the end)
+            f.write(b.read(video['file']))
+        # sensor orientation as recorded; every frame exactly once, in order (no rate conversion)
+        proc = subprocess.Popen(['ffmpeg', '-v', 'error', '-noautorotate', '-i', path, '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+                                 '-fps_mode', 'passthrough', '-'], stdout=subprocess.PIPE)
+        size = w * h * 3
+        n = 0
+        try:
+            while wanted:
+                buf = proc.stdout.read(size)
+                if len(buf) < size:
+                    break
+                if n in wanted:
+                    wanted.discard(n)
+                    yield n, np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+                n += 1
+        finally:
+            proc.stdout.close()
+            proc.kill()
+            proc.wait()
+    if wanted:
+        print(f'  note: {len(wanted)} keyframes were missing from {video["file"]} (it has {n} frames)')
+
+
+def export(src, out, max_edge=1920, frames='auto', voxel=0.02, max_points=500_000, depth_size=256, max_video_frames=600):
     b = Bundle(src)
     manifest = b.json('manifest.json') or {}
     if not str(manifest.get('format', '')).startswith('house-capture/'):
@@ -159,36 +230,24 @@ def export(src, out, max_edge=1920, frames='all', voxel=0.02, max_points=500_000
             xyz_all.append(hp[ok])
             rgb_all.append(img[pv[ok].astype(int), pu[ok].astype(int)])
 
-    # training images: the photos (sharp keyframes, ≥1920 px) and, with --frames all, the
-    # RGB of depth frames no photo was paired with (lower resolution, more viewpoints)
-    items = [('photo', p) for p in photos if b.has(p['file'])]
-    if frames == 'all':
-        used = {p.get('depthFrame') for p in photos}
-        items += [('depth', d) for d in depth_recs if d['file'] not in used and d.get('rgb') and b.has(d['rgb'])]
     tf_frames = []
-    for i, (kind, r) in enumerate(items):
-        name = f'{i:04d}'
-        data = b.read(r['file'] if kind == 'photo' else r['rgb'])
-        im = Image.open(io.BytesIO(data)).convert('RGB')  # raw sensor orientation; EXIF dropped on save
-        if kind == 'photo':
-            fx, fy, cx, cy = K3(r['intrinsics'])
-            sx = im.width / r['width']
-        else:
-            fx, fy, cx, cy = K3(r.get('rgbIntrinsics') or r['intrinsics'])
-            sx = 1.0
+    clouds_by_rec = {id(rec): c for rec, c in clouds}
+
+    def emit(im, K, transform, pair, source, manual=False, kind='photo'):
+        """one training image: save it (EXIF-free, downscaled), its camera, and its LiDAR depth"""
+        name = f'{len(tf_frames):04d}'
+        fx, fy, cx, cy = K
         s = min(1.0, max_edge / max(im.size))
         if s < 1:
             im = im.resize((round(im.width * s), round(im.height * s)), Image.LANCZOS)
-        k = sx * s if kind == 'photo' else s
-        fx, fy, cx, cy = fx * k, fy * k, cx * k, cy * k
+            fx, fy, cx, cy = fx * s, fy * s, cx * s, cy * s
         im.save(os.path.join(out, 'images', name + '.jpg'), quality=95)
-        c2w = W2M @ mat(r['transform'])
+        c2w = W2M @ mat(transform)
         frame = {'file_path': f'images/{name}.jpg', 'transform_matrix': c2w.tolist(),
                  'fl_x': fx, 'fl_y': fy, 'cx': cx, 'cy': cy, 'w': im.width, 'h': im.height,
-                 'source': r['file'], 'manual': bool(r.get('manual')) if kind == 'photo' else False}
-        # depth seen from this camera: re-project the paired depth frame (or the nearest one)
-        pair = by_depth.get(r.get('depthFrame')) if kind == 'photo' else r
-        cloud = next((c for rec, c in clouds if rec is pair), None)
+                 'source': source, 'kind': kind, 'manual': manual}
+        # depth seen from this camera: re-project the depth frame from the same moment
+        cloud = clouds_by_rec.get(id(pair)) if pair is not None else None
         if cloud is not None and len(cloud):
             dw = depth_size
             dh = round(dw * im.height / im.width)
@@ -198,6 +257,52 @@ def export(src, out, max_edge=1920, frames='all', voxel=0.02, max_points=500_000
             Image.fromarray(np.clip(dm * 1000, 0, 65535).astype(np.uint16)).save(os.path.join(out, 'depth', name + '.png'))
             frame['depth_file_path'] = f'depth/{name}.png'
         tf_frames.append(frame)
+
+    videos = [v for v in manifest.get('videos') or [] if b.has(v.get('file')) and b.has(v.get('frames'))]
+    if frames == 'auto':
+        frames = 'video' if videos else 'all'
+    if frames == 'video' and not videos:
+        sys.exit('this scan has no video (it was made by an older app version): use --frames all')
+
+    # 1. the video: sharp keyframes, evenly spread over where the phone went
+    nvideo = 0
+    if frames == 'video':
+        times = np.array([d['timestamp'] for d in depth_recs]) if depth_recs else np.zeros(0)
+        for v in videos:
+            recs = b.json(v['frames']) or []
+            pick = select_keyframes(recs, max_frames=max_video_frames)
+            print(f'  {v["file"]}: {len(recs)} frames, {len(pick)} keyframes '
+                  f'(skipped {sum(1 for r in recs if r.get("tracking", "normal") != "normal" or r.get("blurPixels", 0) > MAX_BLUR)} blurry or badly tracked)')
+            want = {r['index']: r for r in pick}
+            for index, rgb in decode_frames(b, v, sorted(want)):
+                r = want[index]
+                pair = None
+                if len(times):
+                    j = int(np.argmin(np.abs(times - r['timestamp'])))
+                    if abs(times[j] - r['timestamp']) < 0.25:
+                        pair = depth_recs[j]
+                emit(Image.fromarray(rgb), K3(r['intrinsics']), r['transform'], pair, f'{v["file"]}#{index}', kind='video')
+                nvideo += 1
+
+    # 2. photos: the shutter's full-resolution tour stops always; the automatic ones too when
+    # there is no video (with a video they are copies of its frames)
+    for p in photos:
+        if not b.has(p['file']) or (frames == 'video' and not p.get('manual')):
+            continue
+        im = Image.open(io.BytesIO(b.read(p['file']))).convert('RGB')  # raw sensor orientation; EXIF dropped on save
+        sx = im.width / p['width']
+        fx, fy, cx, cy = K3(p['intrinsics'])
+        emit(im, (fx * sx, fy * sx, cx * sx, cy * sx), p['transform'], by_depth.get(p.get('depthFrame')), p['file'],
+             manual=bool(p.get('manual')))
+
+    # 3. without a video, --frames all adds the 640-wide RGB of depth frames no photo was paired with
+    if frames == 'all':
+        used = {p.get('depthFrame') for p in photos}
+        for d in depth_recs:
+            if d['file'] in used or not d.get('rgb') or not b.has(d['rgb']):
+                continue
+            im = Image.open(io.BytesIO(b.read(d['rgb']))).convert('RGB')
+            emit(im, K3(d.get('rgbIntrinsics') or d['intrinsics']), d['transform'], d, d['rgb'], kind='depth')
 
     if xyz_all:
         xyz, rgb = np.concatenate(xyz_all), np.concatenate(rgb_all).astype(np.float64)
@@ -225,7 +330,7 @@ def export(src, out, max_edge=1920, frames='all', voxel=0.02, max_points=500_000
     with open(os.path.join(out, 'transforms.json'), 'w') as f:
         json.dump(tf, f, indent=1)
     nd = sum(1 for f in tf_frames if 'depth_file_path' in f)
-    print(f'{out}: {len(tf_frames)} images ({sum(1 for k, _ in items if k == "photo")} photos), '
+    print(f'{out}: {len(tf_frames)} images ({nvideo} from the video), '
           f'{nd} with LiDAR depth, {npts} starting points')
     return tf
 
@@ -235,11 +340,13 @@ def main():
     ap.add_argument('bundle')
     ap.add_argument('-o', '--out', default='dataset')
     ap.add_argument('--max-edge', type=int, default=1920, help='downscale images to this long edge')
-    ap.add_argument('--frames', choices=['all', 'photos'], default='all',
-                    help='all: photos + RGB of the other depth frames (more viewpoints); photos: photos only')
+    ap.add_argument('--frames', choices=['auto', 'video', 'all', 'photos'], default='auto',
+                    help='video: keyframes of the scan video + shutter photos (default when the scan has a video); '
+                         'all: photos + RGB of the other depth frames (scans without video); photos: photos only')
+    ap.add_argument('--max-video-frames', type=int, default=600, help='at most this many keyframes per room video')
     ap.add_argument('--voxel', type=float, default=0.02, help='point cloud voxel size in meters')
     a = ap.parse_args()
-    export(a.bundle, a.out, a.max_edge, a.frames, a.voxel)
+    export(a.bundle, a.out, a.max_edge, a.frames, a.voxel, max_video_frames=a.max_video_frames)
 
 
 if __name__ == '__main__':

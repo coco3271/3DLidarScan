@@ -22,6 +22,60 @@ ARKit poses**, so there's no need for COLMAP, which fails on blank walls, and **
 geometry** to tell what is a wall, a floor, a door. The generative model therefore only has to
 hallucinate the genuinely unseen parts, not guess the geometry.
 
+## Capture v2: video, like the SpAItial app
+
+SpAItial's app records a **video** while it LiDAR-scans, coaches the user to move slowly and
+cover every angle, and shows what has been scanned. It then builds **Gaussian splats** rather
+than a modeled room. Splats are far more faithful, because every pixel comes from the real
+footage. Our app now works the same way.
+
+| | Before | Now |
+|---|---|---|
+| Main capture | Photos every ~0.4 m / 17° (and full-resolution stills that paused the camera) | **Continuous video per room** (`video/room-N.mov`, HEVC at 1920×1440 and 30 fps, ~120 MB/min), plus **every frame's pose** (`video/room-N.json`: position, direction, intrinsics, tracking, predicted blur) |
+| LiDAR | Depth at each photo and every ~0.2 s | Same: depth ~5×/s, paired with video frames by timestamp |
+| Coverage mesh | Red → green only where photos were taken | **Red → green as you film**: every sharp depth frame counts |
+| Speed | — | **Speed meter + "Slow down" banner + haptic** when the phone moves or turns too fast for sharp frames (0.9 m/s, 57°/s, or 10 px of predicted blur; with hysteresis) |
+| Coaching | Name-the-room alert | **5-page tutorial** before the first scan and from the "?" button: film slowly, high/middle/low, turn red to green, lighting and mirrors |
+| Output | Clean modeled dollhouse (`model.html`) | **Gaussian splats** (`splat.html`, and **PlayCanvas** `scene.sog` + `playcanvas.html`); the modeled dollhouse stays for floor plans and measurements |
+
+### How the video becomes a splat
+
+1. **Keyframes.** `export_dataset.py` reads the per-frame poses, not the pixels. It takes a
+   keyframe every ~12 cm or ~7° of turn, choosing the sharpest frame (lowest predicted blur) in
+   the next 0.3 s. Frames with poor tracking or more than 6 px of blur are never used. ffmpeg
+   then decodes only those frames, in sensor orientation, with no rotation and no frame-rate
+   conversion, so frame i is exactly pose i.
+2. **Depth.** Each keyframe gets the LiDAR depth frame closest in time, re-projected into the
+   keyframe's exact camera.
+3. **Training.** As before: LiDAR-initialized 3DGS, depth loss, per-frame exposure
+   correction, then the generative repair rounds.
+4. **Outputs.**
+   - `scene.ply`, the standard format, for SuperSplat, Polycam and game engines.
+   - `scene.sog` and `dollhouse.sog`, PlayCanvas's compressed format (about 10× smaller), made
+     with PlayCanvas `splat-transform`.
+   - `playcanvas.html`, PlayCanvas's own viewer: it starts above the house, has one annotation
+     per room and an automatic walkthrough tour along the filmed path.
+   - `splat.html`, our viewer: the dollhouse with the ceiling cut away, Walk, and Photos with
+     compare.
+
+On the synthetic test house, training from the video gave **28.6 dB** on held-out views,
+against **24.3 dB** from photos alone, with the same number of steps.
+
+### Next for capture
+
+- **Live keyframe counter and "angles" coverage.** Today the mesh turns green once a surface
+  has been seen up close. Splats also need each surface seen from several *directions*. Track
+  a per-voxel view-direction histogram and keep a surface amber until it has been filmed from
+  at least two directions about 30° apart.
+- **Ghost path.** Draw the path already walked on the mini-map with the directions the camera
+  faced, so gaps are obvious. That is the "cover different angles" coaching in visual form.
+- **Exposure lock.** Lock exposure and white balance per room after the first seconds, so
+  frames are consistent. The trainer already corrects drift, but locking is better.
+- **Upload and process.** Upload from the app to a GPU worker that runs `make_splat.py` and
+  shows `playcanvas.html` in the app (see Phase 4).
+- **On-device splats.** Scaniverse shows a phone can train a small splat itself. The reference
+  renderer here is plain PyTorch math, so it could be ported to Metal for an on-phone preview.
+
 ## Architecture
 
 ```

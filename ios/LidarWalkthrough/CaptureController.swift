@@ -5,9 +5,11 @@ import SwiftUI
 import UIKit
 
 /// Runs one property capture: Apple's RoomPlan (a headless RoomCaptureSession) builds the
-/// parametric room model while, on the same ARSession, we record the LiDAR mesh, depth frames,
-/// automatic reference photos and full-resolution shutter photos, each tagged with GPS +
-/// compass. ScanOverlay draws the live mesh, colored by how well the photos cover it.
+/// parametric room model while, on the same ARSession, we record a video of each room with
+/// every frame's camera pose (what Gaussian splatting trains on), the LiDAR mesh, depth
+/// frames, reference photos and full-resolution shutter photos, each tagged with GPS +
+/// compass. ScanOverlay draws the live mesh, colored by how well the capture covers it, and the
+/// HUD warns when the phone moves too fast for sharp frames.
 /// Several rooms in a row share one ARKit world, so StructureBuilder can merge them into a
 /// floor plan and every pose in the bundle lines up.
 @MainActor
@@ -44,6 +46,15 @@ final class CaptureController: NSObject, ObservableObject {
   @Published var meshVisible = true {
     didSet { overlay.meshVisible = meshVisible }
   }
+  /// how fast the phone is moving for the recording (good / fast / too fast) and a 0…1 meter
+  @Published private(set) var motion: MotionMonitor.Level = .good
+  @Published private(set) var speedMeter: Float = 0
+  /// this room's video so far
+  @Published private(set) var videoSeconds: TimeInterval = 0
+  @Published private(set) var videoFrames = 0
+  /// frames from the camera, ~60/s on the render thread: video + speed
+  private let tap = FrameTap()
+  private var lastSpeedWarning: CFTimeInterval = 0
 
   let arSession = ARSession()
   /// what the photos have captured, shared with the overlay that colors the mesh
@@ -94,7 +105,7 @@ final class CaptureController: NSObject, ObservableObject {
       house: folder.lastPathComponent, houseName: propertyName, session: folder.lastPathComponent,
       property: PropertyInfo(name: propertyName), app: AppInfo())
     super.init()
-    for sub in ["rooms", "mesh", "photos", "depth"] {
+    for sub in ["rooms", "mesh", "photos", "depth", "video"] {
       try? FileManager.default.createDirectory(at: folder.appendingPathComponent(sub), withIntermediateDirectories: true)
     }
     locationSink = location.objectWillChange.sink { [weak self] _ in
@@ -108,6 +119,8 @@ final class CaptureController: NSObject, ObservableObject {
     }
     overlay.onCoverage = { [weak self] fraction in self?.coverageChanged(fraction) }
     overlay.onMeshAnchors = { [weak self] count in self?.meshAnchors = count }
+    let tap = tap
+    overlay.setFrameHandler { frame in tap.handle(frame) }
   }
 
   static var isSupported: Bool { RoomCaptureSession.isSupported }
@@ -127,6 +140,9 @@ final class CaptureController: NSObject, ObservableObject {
     coverageHistory = []
     if paused { paused = false }
     roomSession.run(configuration: RoomCaptureSession.Configuration())
+    tap.startRecording(VideoRecorder(url: folder.appendingPathComponent("video/room-\(roomIndex).mov"), room: roomIndex))
+    videoSeconds = 0
+    videoFrames = 0
     phase = .scanning
     UIApplication.shared.isIdleTimerDisabled = true
     ticker?.invalidate()
@@ -142,8 +158,17 @@ final class CaptureController: NSObject, ObservableObject {
     phase = .processingRoom
     ticker?.invalidate()
     Task {
-      await self.exportMesh()
+      await self.endRecording()
       self.roomSession.stop(pauseARSession: false)
+    }
+  }
+
+  /// The room's scan is over: save its LiDAR mesh and close its video
+  private func endRecording() async {
+    await exportMesh()
+    guard let recorder = tap.stopRecording() else { return }
+    if let video = await recorder.finish(folder: folder) {
+      manifest.videos = (manifest.videos ?? []).filter { $0.room != video.room } + [video]
     }
   }
 
@@ -181,7 +206,7 @@ final class CaptureController: NSObject, ObservableObject {
   private func roomFailed(_ error: Error) async {
     if phase == .scanning {
       phase = .processingRoom
-      await exportMesh()
+      await endRecording()
     }
     ticker?.invalidate()
     warning = "RoomPlan couldn't model this room (\(error.localizedDescription)). The LiDAR mesh and photos are saved."
@@ -212,6 +237,7 @@ final class CaptureController: NSObject, ObservableObject {
   func togglePause() {
     guard phase == .scanning else { return }
     paused.toggle()
+    tap.setRecording(!paused)
   }
 
   private func roomProcessed(_ room: CapturedRoom, error: Error?) async {
@@ -219,9 +245,9 @@ final class CaptureController: NSObject, ObservableObject {
     guard phase == .processingRoom || phase == .scanning else { return }
     ticker?.invalidate()
     if phase == .scanning {
-      // RoomPlan ended the room by itself (error, tracking lost): still keep the LiDAR mesh
+      // RoomPlan ended the room by itself (error, tracking lost): still keep the mesh and video
       phase = .processingRoom
-      await exportMesh()
+      await endRecording()
     }
     if let error { warning = "RoomPlan: \(error.localizedDescription)" }
     let index = roomIndex
@@ -290,6 +316,11 @@ final class CaptureController: NSObject, ObservableObject {
   func abandon() async {
     ticker?.invalidate()
     if phase == .scanning || phase == .processingRoom { roomSession.stop() }
+    // the room in progress is discarded, its video too
+    if let recorder = tap.stopRecording(), let video = await recorder.finish(folder: folder) {
+      try? FileManager.default.removeItem(at: folder.appendingPathComponent(video.file))
+      try? FileManager.default.removeItem(at: folder.appendingPathComponent(video.frames))
+    }
     if !rooms.isEmpty {
       phase = .roomDone
       await finishProperty()
@@ -319,6 +350,7 @@ final class CaptureController: NSObject, ObservableObject {
   private func tick() {
     guard phase == .scanning, let frame = arSession.currentFrame else { return }
     ensureMeshAndDepth(now: frame.timestamp)
+    updateMotion()
     guard case .normal = frame.camera.trackingState else {
       previousPose = (frame.timestamp, frame.camera.transform)
       return
@@ -352,14 +384,33 @@ final class CaptureController: NSObject, ObservableObject {
     arSession.run(updated, options: []) // no reset: same world, RoomPlan keeps going
   }
 
-  /// Depth while walking: up to 5/s, only when the phone moved or turned a little
+  /// The speed meter and "Slow down" warning (with a haptic tap, at most every 2 s)
+  private func updateMotion() {
+    let m = tap.motionSnapshot()
+    speedMeter = m.meter
+    if motion != m.level {
+      if m.level == .tooFast, CACurrentMediaTime() - lastSpeedWarning > 2 {
+        lastSpeedWarning = CACurrentMediaTime()
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+      }
+      motion = m.level
+    }
+    let v = tap.videoProgress()
+    videoSeconds = v.seconds
+    videoFrames = v.frames
+  }
+
+  /// Depth while walking: up to 5/s, only when the phone moved or turned a little. Each depth
+  /// frame is also what the video saw at that moment, so it turns the mesh green there
+  /// (unless the phone moved too fast for a sharp frame).
   private func considerDepth(_ frame: ARFrame) {
     guard frame.sceneDepth != nil, writer.inFlight < 4 else { return }
     let pose = frame.camera.transform
     if let last = lastDepth {
       guard frame.timestamp - last.time > 0.2, moved(pose, last.pose) > 0.04 || turned(pose, last.pose) > 0.06 else { return }
     }
-    recordDepth(frame)
+    guard recordDepth(frame) != nil else { return }
+    if motion != .tooFast, let sample = DepthSample(frame) { overlay.addPhoto(sample) }
   }
 
   /// Save the frame's LiDAR depth (+ its 640×480 RGB and pose) as depth/NNNNN.*
@@ -383,24 +434,20 @@ final class CaptureController: NSObject, ObservableObject {
     trail.append(spot.point)
   }
 
-  /// Automatic reference photos, the bulk of the "hundreds of photos": one whenever you've moved
-  /// ~0.4 m or turned ~17° and the view is steady enough to be sharp. A full-resolution still
-  /// is requested when possible (every ~2.5 s), otherwise the 1920×1440 video frame is kept.
+  /// Automatic reference photos (the video is the main capture; these are its sharpest
+  /// moments as JPEGs, with depth, for the AI kit's model and photo tour): one whenever you've
+  /// moved ~0.6 m or turned ~25° and the view is steady. Always the video frame: a
+  /// full-resolution still would make the video stutter, so only the shutter asks for one.
   private func considerAutoPhoto(_ frame: ARFrame) {
     let pose = frame.camera.transform
     guard writer.inFlight < 3, !highResInFlight, let prev = previousPose else { return }
     let blur = motionBlur(frame, since: prev)
     guard blur < Self.maxAutoBlur else { return }
     if let last = lastAutoPhoto {
-      guard frame.timestamp - last.time > 0.8, moved(pose, last.pose) > 0.4 || turned(pose, last.pose) > 0.3 else { return }
+      guard frame.timestamp - last.time > 1.0, moved(pose, last.pose) > 0.6 || turned(pose, last.pose) > 0.45 else { return }
     }
     lastAutoPhoto = (frame.timestamp, pose)
-    let thermalOK = ProcessInfo.processInfo.thermalState == .nominal || ProcessInfo.processInfo.thermalState == .fair
-    if highResSupported, thermalOK, CACurrentMediaTime() - lastHighResRequest > 2.5 {
-      requestHighRes(manual: false, near: pose)
-    } else {
-      savePhoto(frame, manual: false, highRes: false, blur: blur)
-    }
+    savePhoto(frame, manual: false, highRes: false, blur: blur)
   }
 
   /// Predicted smear in pixels (at 1920 wide) from how fast the camera turns and moves during
@@ -489,7 +536,7 @@ final class CaptureController: NSObject, ObservableObject {
     acos(min(1, max(-1, simd_dot(simd_make_float3(a.columns.2), simd_make_float3(b.columns.2)))))
   }
 
-  private static func describe(_ state: ARCamera.TrackingState) -> String {
+  nonisolated static func describe(_ state: ARCamera.TrackingState) -> String {
     switch state {
     case .normal: return "normal"
     case .notAvailable: return "notAvailable"
@@ -536,5 +583,47 @@ final class RoomSessionDelegate: NSObject, RoomCaptureSessionDelegate, @unchecke
     case .normal: return nil
     @unknown default: return nil
     }
+  }
+}
+
+/// The camera feed's consumer on SceneKit's render thread: writes the room's video and keeps
+/// the motion meter. Main reads snapshots of it.
+final class FrameTap: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recorder: VideoRecorder?
+  private var monitor = MotionMonitor()
+  private var recording = true
+
+  func handle(_ frame: ARFrame) {
+    let cam = frame.camera
+    let fx1920 = cam.intrinsics.columns.0.x * 1920 / Float(cam.imageResolution.width)
+    let (rec, blur) = lock.withLock { () -> (VideoRecorder?, Float) in
+      if case .normal = cam.trackingState {
+        monitor.add(time: frame.timestamp, pose: cam.transform, exposure: cam.exposureDuration, fx1920: fx1920)
+      }
+      return (recording ? recorder : nil, monitor.blurPixels)
+    }
+    rec?.append(frame.capturedImage, timestamp: frame.timestamp, transform: cam.transform, intrinsics: cam.intrinsics,
+                exposure: cam.exposureDuration, tracking: CaptureController.describe(cam.trackingState), blurPixels: blur)
+  }
+
+  func startRecording(_ r: VideoRecorder) {
+    lock.withLock { recorder = r; recording = true; monitor.reset() }
+  }
+
+  /// detach the recorder (call finish(folder:) on it)
+  func stopRecording() -> VideoRecorder? {
+    lock.withLock { defer { recorder = nil }; return recorder }
+  }
+
+  func setRecording(_ on: Bool) { lock.withLock { recording = on } }
+
+  func motionSnapshot() -> (level: MotionMonitor.Level, meter: Float) {
+    lock.withLock { (monitor.level, monitor.meter) }
+  }
+
+  func videoProgress() -> (seconds: TimeInterval, frames: Int) {
+    guard let r = lock.withLock({ recorder }) else { return (0, 0) }
+    return (r.duration, r.frameCount)
   }
 }

@@ -137,7 +137,19 @@ serve this repo (or enable GitHub Pages on it) and open `web/index.html`, then p
 python3 -m http.server 8000      # then http://localhost:8000/web/
 ```
 
-## Photoreal walkthrough (Gaussian splats + generative repair)
+## Photoreal walkthrough from the scan video (Gaussian splats + generative repair)
+
+**Capture.** The app films each room while it LiDAR-scans: `video/room-N.mov`, with every
+frame's camera position, direction and intrinsics in `video/room-N.json`. It coaches you as
+you go:
+- a tutorial before the first scan;
+- a speed meter, and a red "Slow down" banner with a buzz when you move too fast for sharp
+  frames;
+- the LiDAR mesh turns from red to green as you film.
+
+**Processing.** The pipeline picks sharp keyframes from the video, pairs them with LiDAR depth,
+and trains Gaussian splats. It writes our viewer (`splat.html`) and PlayCanvas's files
+(`scene.sog`, `playcanvas.html`; edit them in [SuperSplat](https://superspl.at/editor)).
 
 Besides the clean dollhouse model, a scan can become a **photoreal** 3D walkthrough, like
 SpAItial's Echo-3: the scene is reconstructed from the photos as 3D Gaussian splats, then
@@ -147,8 +159,10 @@ the scene. The plan and the method are in [`docs/ECHO_PLAN.md`](docs/ECHO_PLAN.m
 
 ```sh
 pip install numpy pillow torch            # + gsplat and Difix3D on an NVIDIA GPU (see BUILD_SPLAT.md)
+brew install ffmpeg node                  # reads the video; makes the PlayCanvas files
 python3 ai-kit/splat/make_splat.py Scan.zip -o splat-work --fixer difix --quality standard
 open splat-work/splat.html                # Dollhouse (ceiling cut away), Walk, Photos + compare
+open splat-work/playcanvas.html           # PlayCanvas viewer: room annotations, walkthrough tour
 ```
 
 A whole house needs an NVIDIA GPU, roughly 20–40 min on an L4/A10G. With Claude Code, give it

@@ -56,12 +56,19 @@ struct PropertyListScreen: View {
     }
   }
 
+  static func minutes(_ t: TimeInterval) -> String {
+    let s = Int(t.rounded())
+    return s < 60 ? "\(s) s" : String(format: "%d:%02d", s / 60, s % 60)
+  }
+
   private func summary(_ scan: ScanSummary) -> String {
     guard let m = scan.manifest else { return "" }
     return [
       m.createdAt.formatted(date: .abbreviated, time: .shortened),
       "\(m.rooms.count) room\(m.rooms.count == 1 ? "" : "s")",
-      "\(m.photoCount) photos",
+      m.videos.flatMap { v in
+        v.isEmpty ? nil : "\(Self.minutes(v.reduce(0) { $0 + $1.duration })) video"
+      } ?? "\(m.photoCount) photos",
       m.property?.address,
     ].compactMap { $0 }.joined(separator: " · ")
   }

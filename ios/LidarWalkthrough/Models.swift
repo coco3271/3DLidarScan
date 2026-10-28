@@ -45,6 +45,43 @@ struct Manifest: Codable {
   // additions (ignored by house-capture readers)
   var property: PropertyInfo?
   var app: AppInfo?
+  /// one video per room with every frame's pose (video/room-N.mov + .json): what Gaussian
+  /// splatting trains on
+  var videos: [VideoRecord]?
+}
+
+/// A room's scan video. Frame i of `file` is entry i of `frames` (a [VideoFrameRecord]).
+struct VideoRecord: Codable {
+  var room: Int
+  var file: String
+  var frames: String
+  /// sensor orientation (landscape), the orientation the intrinsics describe
+  var width: Int
+  var height: Int
+  var codec: String
+  var frameCount: Int
+  var duration: TimeInterval
+  var fps: Double
+  /// frames skipped because the encoder was busy
+  var dropped: Int
+}
+
+/// Where the camera was for one video frame
+struct VideoFrameRecord: Codable {
+  var index: Int
+  /// presentation time in the video (seconds from its first frame)
+  var time: TimeInterval
+  /// ARKit's clock, the same as photos' and depth frames' `timestamp` (pairs frames with depth)
+  var timestamp: TimeInterval
+  /// camera-to-world, column-major; the camera looks down -Z, +Y up (sensor orientation)
+  var transform: [Float]
+  /// column-major 3x3 for the video's pixels
+  var intrinsics: [Float]
+  var exposure: TimeInterval
+  var tracking: String
+  /// predicted motion smear in pixels at 1920 wide (the pipeline skips blurry frames)
+  var blurPixels: Float
+  var pose: CameraPose?
 }
 
 struct PropertyInfo: Codable {
