@@ -15,13 +15,17 @@ jobs:
         with:
           node-version: "22"
       - run: pip install numpy pillow
+      # CPU PyTorch for the splat pipeline's tests (the reference renderer needs no GPU)
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: cd tests && npm install && npx playwright-core install --with-deps chromium
       - run: tests/run.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: walkthrough-screenshots
-          path: tests/out/*.png
+          path: |
+            tests/out/*.png
+            tests/out/splat/previews/*.jpg
   ios:
     name: iOS app builds
     runs-on: macos-15

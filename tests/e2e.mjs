@@ -299,6 +299,53 @@ console.log('clean model (make_model.py)')
   }
 }
 
+// ---- 6. the photoreal splat walkthrough (ai-kit/splat), when run.sh could train one -------------
+if (existsSync(path.join(out, 'splat', 'splat.html'))) {
+  console.log('photoreal splat walkthrough')
+  const file = 'file://' + path.join(out, 'splat', 'splat.html')
+  const { page, errors } = await open(file)
+  const ready = await page.evaluate(() => !!window.walkthrough)
+  check(ready && errors.length === 0, `splat.html loads without errors ${errors.join(' | ')}`)
+  if (ready) {
+    await page.waitForTimeout(1500)
+    await page.screenshot({ path: path.join(out, 'splat-dollhouse.png') })
+    const counts = await page.evaluate(() => window.walkthrough.scene.children.length)
+    check(counts >= 3, `splats in the scene (${counts} objects)`)
+    // the image is not empty: the splats cover a good part of the dollhouse view
+    const covered = await page.evaluate(() => {
+      const c = window.walkthrough.renderer.domElement, g = document.createElement('canvas')
+      g.width = 64; g.height = 40
+      const x = g.getContext('2d'); x.drawImage(c, 0, 0, 64, 40)
+      const d = x.getImageData(0, 0, 64, 40).data
+      let n = 0
+      for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - 11) + Math.abs(d[i + 1] - 22) + Math.abs(d[i + 2] - 38) > 40) n++
+      return n / (64 * 40)
+    })
+    check(covered > 0.15, `the dollhouse shows the scene (${Math.round(covered * 100)}% of the view)`)
+    await page.click('.sv-modes button[data-mode=walk]'); await page.waitForTimeout(300)
+    check(await page.evaluate(() => window.walkthrough.mode) === 'walk' && await page.isVisible('.sv-move'), 'splat: Walk mode with touch buttons')
+    await page.click('.sv-modes button[data-mode=photo]')
+    // software rendering is slow: wait for the frame that applies the photo camera
+    await page.waitForFunction(() => {
+      const p = window.walkthrough.photos[0], c = window.walkthrough.camera
+      return Math.hypot(c.position.x - p.transform[0][3], c.position.z - p.transform[2][3]) < 1e-3
+    }, null, { timeout: 20000 }).catch(() => {})
+    const t = await page.evaluate(() => {
+      const p = window.walkthrough.photos[0], c = window.walkthrough.camera
+      return { d: Math.hypot(c.position.x - p.transform[0][3], c.position.y - p.transform[1][3], c.position.z - p.transform[2][3]),
+               fov: c.fov, want: 2 * Math.atan(p.w / 2 / p.fl_x) * 180 / Math.PI }
+    })
+    check(t.d < 1e-3 && Math.abs(t.fov - t.want) < 0.01, `splat: photo camera sits exactly at the photo (Δ ${t.d.toExponential(1)} m)`)
+    await page.locator('.sv-photo .ov').fill('50')
+    check(await page.evaluate(() => !document.querySelector('.sv-overlay').hidden), 'splat: compare overlay')
+    await page.screenshot({ path: path.join(out, 'splat-photo.png') })
+    await page.click('.sv-modes button[data-mode=dollhouse]'); await page.waitForTimeout(300)
+    check(await page.evaluate(() => window.walkthrough.camera.position.y > 3), 'splat: back to the dollhouse overview')
+    check(errors.length === 0, `splat: no errors after interaction (${errors.join(' | ')})`)
+  }
+  await page.close()
+}
+
 await browser.close()
 console.log(failures.length ? `\n${failures.length} FAILED:\n- ${failures.join('\n- ')}` : '\nall browser checks passed')
 process.exit(failures.length ? 1 : 0)

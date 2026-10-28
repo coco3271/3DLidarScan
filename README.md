@@ -137,6 +137,24 @@ serve this repo (or enable GitHub Pages on it) and open `web/index.html`, then p
 python3 -m http.server 8000      # then http://localhost:8000/web/
 ```
 
+## Photoreal walkthrough (Gaussian splats + generative repair)
+
+Besides the clean dollhouse model, a scan can become a **photoreal** 3D walkthrough, like
+SpAItial's Echo-3: the scene is reconstructed from the photos as 3D Gaussian splats, then
+cleaned with generative AI wherever the capture was thin. New viewpoints are rendered, repaired
+by a diffusion model (NVIDIA Difix, or FLUX Fill / OpenAI image edits), and trained back into
+the scene. The plan and the method are in [`docs/ECHO_PLAN.md`](docs/ECHO_PLAN.md).
+
+```sh
+pip install numpy pillow torch            # + gsplat and Difix3D on an NVIDIA GPU (see BUILD_SPLAT.md)
+python3 ai-kit/splat/make_splat.py Scan.zip -o splat-work --fixer difix --quality standard
+open splat-work/splat.html                # Dollhouse (ceiling cut away), Walk, Photos + compare
+```
+
+A whole house needs an NVIDIA GPU, roughly 20–40 min on an L4/A10G. With Claude Code, give it
+[`BUILD_SPLAT.md`](BUILD_SPLAT.md) and the zip. `ai-kit/splat/export_dataset.py` alone turns a
+scan into a standard nerfstudio dataset for nerfstudio, gsplat, Brush or OpenSplat.
+
 ## What's in an exported zip
 
 ```
@@ -179,6 +197,10 @@ derives edge cases from it: one room, no mesh, no depth, no photos, ASCII PLY, r
 and a zip with no folder. `tests/run.sh` runs:
 - the vendored scan-to-threejs scripts,
 - `make_walkthrough.py` and `make_model.py`,
+- the splat pipeline on CPU when torch is installed (`TORCH_PYTHON` picks the interpreter):
+  dataset export checked against the ray-traced scene, renderer gradients, training to
+  >22 dB on held-out photos, generative rounds, exports, and `splat.html` in the browser
+  (`tests/test_splat.py`),
 - the kit's unit tests (`tests/test_kit.py`, `tests/test_model.py`: measured rooms, merged
   walls, furniture placement, colors and floor textures sampled from the photos, rebuilds),
 - `tests/e2e.mjs`, which loads every variant in headless Chromium and drives the real UI,

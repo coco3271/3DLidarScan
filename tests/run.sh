@@ -38,6 +38,19 @@ for v in single-room no-depth no-photos; do
 done
 python3 tests/test_model.py "$OUT"
 
+echo "== photoreal splats (ai-kit/splat)"
+# needs torch; TORCH_PYTHON picks an interpreter that has it (default: python3)
+TP="${TORCH_PYTHON:-python3}"
+if "$TP" -c "import torch" 2>/dev/null; then
+  python3 ai-kit/splat/export_dataset.py "$OUT/FakeHouse.zip" -o "$OUT/dataset"
+  "$TP" ai-kit/splat/train.py "$OUT/dataset" -o "$OUT/splat" --steps 600 --downscale 2 --init-points 15000 \
+    --sh-degree 1 --eval --fixer classic --gen-rounds 2 --gen-views 6 | grep -v '^  step [0-9]*/'
+  python3 ai-kit/splat/make_splat_html.py "$OUT/splat" --dataset "$OUT/dataset"
+  "$TP" tests/test_splat.py "$OUT"
+else
+  echo "torch not installed: skipping (pip install torch, or set TORCH_PYTHON)"
+fi
+
 echo "== browser"
 (cd tests && [ -d node_modules ] || npm install --silent)
 node tests/e2e.mjs "$OUT"
